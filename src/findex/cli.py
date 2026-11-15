@@ -6,6 +6,7 @@
     findex [-v|-vv] stats  <index> [--top 20]
     findex [-v|-vv] crawl  <seed-url>... [--max-pages 500] [--concurrency 10] [--per-host 2]
                            [--delay 0.5] [--domain d]... [--out data/crawl/crawl.jsonl]
+    findex serve [--index data/index.pkl] [--host 127.0.0.1] [--port 8000] [--workers 1]
 
 Results go to stdout; every diagnostic (logs, progress, errors) goes to stderr, so
 `findex search ix.pkl "q" --json | jq .title` stays clean.
@@ -345,6 +346,25 @@ def crawl_cmd(
         f"{stats.pages} pages in {stats.elapsed:.1f} s ({stats.pages_per_s:.1f} pages/s), "
         f"{stats.errors} errors -> [bold]{out_path}[/], log: {log_path}"
     )
+
+
+@app.command("serve")
+def serve_cmd(
+    index_path: Annotated[Path, typer.Option("--index", help="index file to serve")] = Path(
+        "data/index.pkl"
+    ),
+    host: Annotated[str, typer.Option(help="interface to bind")] = "127.0.0.1",
+    port: Annotated[int, typer.Option(min=1, max=65535)] = 8000,
+    workers: Annotated[int, typer.Option(min=1, help="uvicorn worker processes")] = 1,
+) -> None:
+    """Run the web API and UI (uvicorn + findex.web.app)."""
+    import os
+
+    import uvicorn
+
+    # configuration reaches every worker process through the environment (12-factor)
+    os.environ["INDEX_PATH"] = str(index_path)
+    uvicorn.run("findex.web.app:app", host=host, port=port, workers=workers, log_level="warning")
 
 
 if __name__ == "__main__":

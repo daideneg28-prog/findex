@@ -5,6 +5,7 @@ on:
     branches: [main]
     tags: ["*"]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   check:
@@ -37,3 +38,29 @@ jobs:
           uv tool install dist/*.whl
           findex --help
           findex --version
+
+  # The image downloads 40 books from Project Gutenberg while building, so it is built
+  # only for tags and on demand, not on every push.
+  docker:
+    needs: check
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image
+        run: docker build -t findex .
+
+      - name: Run it and probe the API
+        run: |
+          docker run -d --name findex -p 8000:8000 findex
+          for i in $(seq 1 60); do
+            curl -fs http://localhost:8000/health && break
+            sleep 1
+          done
+          curl -fs http://localhost:8000/health
+          curl -fs "http://localhost:8000/search?q=alice&k=3" | python3 -m json.tool
+          test "$(curl -s -o /dev/null -w '%{http_code}' 'http://localhost:8000/search?k=abc&q=x')" = 422
+          docker exec findex id -u | grep -qx 1000   # runs as the non-root user
+          docker stats --no-stream findex
+          docker logs findex | tail -n 5

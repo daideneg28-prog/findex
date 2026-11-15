@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}{% if q %}{{ q }} — {% endif %}findex{% endblock %}
+{% block main %}
+<form class="search" action="/" method="get" role="search">
+  <input type="search" name="q" value="{{ q }}" maxlength="200" autofocus
+         placeholder='whale NOT ship · "white whale" · tarzan OR jane'
+         aria-label="search query"
+         hx-get="/ui/results" hx-target="#results" hx-push-url="true"
+         hx-trigger="input changed delay:300ms, search" hx-include="[name=scorer]">
+  <select name="scorer" aria-label="ranking" hx-get="/ui/results" hx-target="#results"
+          hx-include="[name=q]">
+    <option value="bm25" {% if scorer == "bm25" %}selected{% endif %}>BM25</option>
+    <option value="tfidf" {% if scorer == "tfidf" %}selected{% endif %}>TF-IDF</option>
+  </select>
+  <button type="submit">Search</button>
+</form>
+{% if documents %}<p class="hint">{{ "{:,}".format(documents) }} books indexed. Query language:
+  words (AND), <code>OR</code>, <code>NOT</code>, <code>"exact phrases"</code>, parentheses.</p>{% endif %}
+<section id="results">{% include "_results.html" %}</section>
+{% endblock %}
