@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import csv
 import io
+import json
 import re
 import sys
 import time
@@ -34,15 +35,14 @@ def fetch(url: str) -> bytes:
         return resp.read()
 
 
-def english_text_ids(limit: int) -> list[int]:
-    """Return the first `limit` English text ids from the catalog, lowest id first."""
+def english_texts(limit: int) -> dict[int, str]:
+    """Return {id: title} for the first `limit` English texts in the catalog, lowest id first."""
     raw = fetch(CATALOG_URL).decode("utf-8")
-    ids: list[int] = []
+    books: dict[int, str] = {}
     for row in csv.DictReader(io.StringIO(raw)):
         if row.get("Type") == "Text" and row.get("Language") == "en":
-            ids.append(int(row["Text#"]))
-    ids.sort()
-    return ids[:limit]
+            books[int(row["Text#"])] = " ".join(row.get("Title", "").split())
+    return {book_id: books[book_id] for book_id in sorted(books)[:limit]}
 
 
 def strip_boilerplate(text: str) -> str:
@@ -61,9 +61,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     args.out.mkdir(parents=True, exist_ok=True)
-    ids = english_text_ids(args.count * 2)  # some ids have no .txt; ask for spares
+    books = english_texts(args.count * 2)  # some ids have no .txt; ask for spares
     saved = len(list(args.out.glob("*.txt")))
-    for book_id in ids:
+    for book_id in books:
         if saved >= args.count:
             break
         target = args.out / f"{book_id}.txt"
@@ -79,6 +79,13 @@ def main(argv: list[str] | None = None) -> int:
         saved += 1
         print(f"[{saved}/{args.count}] {book_id}.txt  {len(text) / 1e6:.2f} MB")
         time.sleep(args.delay)
+
+    # titles.json: {"<id>": "<title>"} for every downloaded book (read by findex.index)
+    titles = {p.stem: books.get(int(p.stem), p.stem) for p in args.out.glob("*.txt")}
+    (args.out / "titles.json").write_text(
+        json.dumps(titles, ensure_ascii=False, indent=0), encoding="utf-8"
+    )
+    print(f"wrote {len(titles)} titles to {args.out / 'titles.json'}")
     return 0
 
 
