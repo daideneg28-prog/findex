@@ -1,5 +1,8 @@
 # findex
 
+[![CI](https://github.com/daideneg28-prog/findex/actions/workflows/ci.yml/badge.svg)](https://github.com/daideneg28-prog/findex/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/daideneg28-prog/findex)](https://github.com/daideneg28-prog/findex/releases)
+
 Невелика пошукова система, яку я будую протягом семестру в курсі
 «Python програмування» ([опис курсу](https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/README.md)).
 Кожна лабораторна додає одну можливість мови й один крок проєкту; кожна позначена git-тегом `lab-0N`.
@@ -18,10 +21,21 @@ uv run python scripts/download_corpus.py --count 150
 
 ## Встановлення
 
+Як інструмент командного рядка, з wheel у [GitHub Release](https://github.com/daideneg28-prog/findex/releases):
+
+```bash
+uv tool install https://github.com/daideneg28-prog/findex/releases/download/v0.4.0/findex-0.4.0-py3-none-any.whl
+findex --help
+```
+
+Для розробки:
+
 ```bash
 uv sync
-uv run python -m pytest
-uv run ruff check .
+uv run pytest            # тести (+ --cov для покриття)
+uv run ruff check .      # лінтер
+uv run pyright           # типи, strict
+uv tool install .        # `findex` у PATH з робочої копії
 ```
 
 ---
@@ -315,3 +329,89 @@ query cache: 5 hits, 3 misses, 3 cached
 Інавгураційні промови займають кілька сторінок, тож за TF-IDF їх витісняють товсті томи, де «fellow citizens» трапляється
 випадково (переписи, «Федераліст»). BM25 піднімає короткі документи, в яких ці слова щільні. Вибірка мала й шумна,
 тож висновок обережний: на цьому корпусі BM25 не гірший ніде і кращий там, де довжина документів дуже різна.
+
+---
+
+## Лаб 4: типи, тести, пакування і CLI
+
+**Що зроблено**
+
+- **Типи: `pyright --strict` дає 0 помилок** на `src/` і `tests/`, без жодного `# type: ignore`.
+  - Найбільше роботи було з постингами. Раніше тип був «`list` або пара `array`», а розгалуження йшло за рядком
+    `representation`, і pyright не міг вивести тип. Тепер є `type PostingList = list[PostingLike] | ArrayPostings`
+    (аліаси PEP 695) і звуження через `isinstance(entry, tuple)`, яке перевіряльник розуміє.
+  - `PostingLike` — `typing.Protocol`, який задовольняють і `Posting`, і `PlainPosting`.
+  - `Scorer` — теж `Protocol`.
+  - Генератори типізовані як `Iterator[...]`, контекстний менеджер — як `Generator[Index]`.
+  - `@timed` має сигнатуру `def timed[**P, R](func: Callable[P, R]) -> Callable[P, R]` (PEP 695 + `ParamSpec`): після
+    декорування pyright і далі бачить справжні параметри функції.
+- **CLI `findex`** (`typer` + `rich`, `[project.scripts] findex = "findex.cli:app"`):
+  - `findex index <corpus> --out ix.pkl [--no-positions] [--limit N] [--repr slots|plain|array]` з прогрес-баром `rich`;
+  - `findex search <index> "<query>" [-k 10] [--scorer bm25|tfidf] [--json] [--no-snippets]`: таблиця з підсвіченими
+    збігами у фрагментах тексту, або JSON lines для `| jq`;
+  - `findex stats <index> [--top 20]`;
+  - `-v` / `-vv` перемикають рівень логування.
+  - **Результати йдуть у stdout, а все діагностичне (логи, прогрес, помилки) у stderr**, тому `--json` можна безпечно
+    передавати далі пайпом.
+  - Коди виходу: `0` — успіх (навіть без результатів), `1` — синтаксична помилка запиту, `2` — немає файлу або неприпустимі
+    параметри (наприклад, `--repr array` разом з позиціями).
+- **Логування** налаштовується один раз у `cli.py` через `RichHandler` у stderr; модулі тільки викликають `logging.getLogger(__name__)`.
+- **CI** (`.github/workflows/ci.yml`) на кожен push і PR:
+  1. ruff (lint + format);
+  2. pyright strict;
+  3. pytest з coverage;
+  4. збирає wheel, ставить його через `uv tool install` у чисте середовище й запускає `findex --help`.
+- **Реліз** [`v0.4.0`](https://github.com/daideneg28-prog/findex/releases/tag/v0.4.0) з wheel і sdist.
+
+```
+$ findex -v search data/index.pkl 'barsoom "dejah thoris"' -k 3
+INFO     load took 3611.77 ms
+INFO     search took 1.35 ms
+INFO     4 documents match 'barsoom "dejah thoris"'
+                   4 documents match 'barsoom "dejah thoris"' (bm25)
+┌───┬────────┬─────────────────────┬──────────────────────────────────────────────────────────────┐
+│ # │  score │ title               │ snippet                                                      │
+├───┼────────┼─────────────────────┼──────────────────────────────────────────────────────────────┤
+│ 1 │ 26.109 │ A princess of Mars  │ …rks of Barsoom. CHAPTER XI WITH DEJAH THORIS As we reached… │
+│ 2 │ 25.969 │ The gods of Mars    │ …who had won the ever beautiful Dejah Thoris, Princess of H… │
+│ 3 │ 25.966 │ The warlord of Mars │ …as Dejah Thoris looked up full into my eyes I made the sig… │
+└───┴────────┴─────────────────────┴──────────────────────────────────────────────────────────────┘
+
+$ findex search data/index.pkl 'white whale' --json -k 1
+{"rank": 1, "score": 5.1277, "title": "Moby-Dick; or, The Whale", "snippet": "…he caught once a whale in Spitzbergen that was white all over.…"}
+
+$ findex search data/index.pkl '(broken'; echo $?
+query error: missing ')'
+1
+```
+
+### Тести
+
+**99 тестів** (`uv run pytest`): 94 звичайні й 5 властивостей Hypothesis.
+
+| Файл | Що перевіряє |
+|---|---|
+| `tests/conftest.py` | спільний корпус: 4 файли + `titles.json` у `tmp_path`, індекс з нього, збережений `.pkl` |
+| `test_tokenize.py` | регістр/`casefold`, кирилиця, комбіновані діакритики, пунктуація, апострофи, дефіси, цифри |
+| `test_corpus_stats.py` | лінивість `iter_documents`, JSONL, бите кодування (лог замість падіння), lazy == eager |
+| `test_index.py` | протокол `Mapping`, статистики, хешованість, позиції, злиття, `open_index` закривається при винятку, round-trip pickle/JSON, регресія `__main__` (`slow`) |
+| `test_query.py` | парсер **як дерева**, `&`/`\|`/`~`, синтаксичні помилки, обчислення фраз |
+| `test_rank.py` | три перевірки адекватності з Лаб 3 як тести, top-k, кеш, `@timed` + `wraps`, сніпети |
+| `test_cli.py` | усі підкоманди через `typer.testing.CliRunner`: таблиця, `--json`, коди виходу, логи саме в stderr |
+| `test_properties.py` | **5 властивостей Hypothesis**: злиття = операції множин; токенізація ідемпотентна; токени вже нормалізовані (NFC, casefold, без пробілів); індекс точно відповідає документам (df, tf, позиції, довжини); JSON round-trip зберігає постинги |
+
+`@pytest.mark.slow` позначає тест, що запускає підпроцес Python (`pytest -m "not slow"` його пропускає).
+
+> На моєму ноутбуці Windows Smart App Control блокує нативне розширення Hypothesis (`ImportError: An Application Control
+> policy has blocked this file`), тому локально `test_properties.py` пропускається з цим поясненням
+> (`pytest.importorskip(..., exc_type=ImportError)`). **У CI на Linux властивості виконуються завжди.**
+> З тієї ж причини `pytest` і `pyright` запускаю як `python -m pytest` і `python -m pyright`: `.exe`-обгортки теж блокуються.
+
+**Покриття: 90%** (`uv run pytest --cov`, branch coverage). Що не покрито і чому:
+
+| Модуль | Покриття | Пояснення |
+|---|---:|---|
+| `search.py` | 0% | старий CLI Лаб 3 (`python -m findex.search`), його замінив `findex search`; лишається для відтворення README Лаб 3 |
+| `__main__.py` | 0% | дві рядки, викликає той самий `app`, що й тести CLI |
+| `index.py` | 87% | `main()` модульного CLI Лаб 2 (`python -m findex.index`) перевіряє лише `slow`-тест у підпроцесі, а coverage не бачить підпроцесів |
+| `cli.py` | 90% | гілка, де фрагмент тексту не вдалося прочитати (файл книги видалили після індексації), і рядки, які `rich` друкує лише у справжньому терміналі |

@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Protocol
 
-from findex.index import Index, Posting
+from findex.index import Index, PostingLike
 from findex.query import parse
 from findex.timing import timed
 
@@ -16,14 +16,14 @@ from findex.timing import timed
 class Scorer(Protocol):
     """Anything with this method is a scorer — no inheritance needed (structural typing)."""
 
-    def score(self, term: str, posting: Posting, index: Index) -> float: ...
+    def score(self, term: str, posting: PostingLike, index: Index) -> float: ...
 
 
 @dataclass(frozen=True)
 class TfIdf:
     """(1 + log tf) · log(N / df). Sub-linear tf, but no saturation and no length norm."""
 
-    def score(self, term: str, posting: Posting, index: Index) -> float:
+    def score(self, term: str, posting: PostingLike, index: Index) -> float:
         idf = math.log(index.num_docs / index.df(term))
         return (1 + math.log(posting.tf)) * idf
 
@@ -43,7 +43,7 @@ class BM25:
         n, df = index.num_docs, index.df(term)
         return math.log(1 + (n - df + 0.5) / (df + 0.5))  # +1 inside keeps it positive
 
-    def score(self, term: str, posting: Posting, index: Index) -> float:
+    def score(self, term: str, posting: PostingLike, index: Index) -> float:
         tf = posting.tf
         length_ratio = index.doc_length(posting.doc_id) / index.avg_doc_length
         norm = self.k1 * (1 - self.b + self.b * length_ratio)
@@ -77,6 +77,10 @@ def match(index: Index, query: str) -> tuple[tuple[int, ...], tuple[str, ...]]:
     A repeated query skips parsing and evaluation entirely — the timing log shows it.
     """
     return _match_cached(index, query)
+
+
+def cache_hits() -> int:
+    return _match_cached.cache_info().hits
 
 
 def cache_info() -> str:

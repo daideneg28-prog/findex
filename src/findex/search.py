@@ -15,7 +15,6 @@ import sys
 from pathlib import Path
 
 from findex.index import open_index
-from findex.merge import ENGINES, difference, intersect, union  # noqa: F401  (Lab 2 API)
 from findex.query import QuerySyntaxError
 from findex.rank import SCORERS, cache_info, match, search
 from findex.snippets import snippet

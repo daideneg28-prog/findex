@@ -5,7 +5,15 @@ from pathlib import Path
 import pytest
 
 from findex.corpus import Document
-from findex.index import REPRESENTATIONS, DocMeta, Posting, build_index, open_index
+from findex.index import (
+    REPRESENTATIONS,
+    DocMeta,
+    Index,
+    Posting,
+    Representation,
+    build_index,
+    open_index,
+)
 from findex.merge import ENGINES, difference, intersect, union
 from findex.store import load, save
 
@@ -18,18 +26,19 @@ DOCS = [
 
 
 @pytest.fixture(params=REPRESENTATIONS)
-def index(request: pytest.FixtureRequest):
-    return build_index(DOCS, request.param)
+def index(request: pytest.FixtureRequest) -> Index:
+    representation: Representation = request.param  # params come back untyped
+    return build_index(DOCS, representation)
 
 
-def test_postings_sorted_with_tf(index) -> None:
+def test_postings_sorted_with_tf(index: Index) -> None:
     assert list(index.doc_ids("whale")) == [0, 2]
     assert index.entries("whale") == [(0, 1), (2, 2)]
     assert index.doc_lengths == {0: 5, 1: 6, 2: 4, 3: 4}
     assert index.doc_meta[1].name == "b"
 
 
-def test_mapping_protocol(index) -> None:
+def test_mapping_protocol(index: Index) -> None:
     assert len(index) == len(index.postings)
     assert "whale" in index and "unicorn" not in index
     assert [(p.doc_id, p.tf) for p in index["whale"]] == [(0, 1), (2, 2)]
@@ -40,14 +49,14 @@ def test_mapping_protocol(index) -> None:
     assert repr(index).startswith("Index(4 docs, ")
 
 
-def test_statistics(index) -> None:
+def test_statistics(index: Index) -> None:
     assert index.num_docs == 4
     assert index.avg_doc_length == pytest.approx(19 / 4)
     assert index.doc_length(1) == 6
     assert index.df("whale") == 2 and index.df("unicorn") == 0
 
 
-def test_index_is_hashable_by_identity(index) -> None:
+def test_index_is_hashable_by_identity(index: Index) -> None:
     assert len({index, index}) == 1
     assert index != build_index(DOCS, index.representation)
 
@@ -86,6 +95,7 @@ def test_open_index_closes_even_on_error(tmp_path: Path) -> None:
     assert ix2.closed
 
 
+@pytest.mark.slow
 def test_cli_pickle_is_loadable(tmp_path: Path) -> None:
     """Regression: `python -m findex.index` once pickled classes as `__main__.Posting`."""
     corpus = tmp_path / "corpus"

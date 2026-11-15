@@ -11,13 +11,13 @@ import time
 import tracemalloc
 from array import array
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Generator, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import cached_property
 from itertools import islice
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
 from findex.corpus import Document, iter_documents
 from findex.timing import timed
@@ -53,13 +53,28 @@ class DocMeta:
     title: str
 
 
+class PostingLike(Protocol):
+    """What readers need from a posting; both Posting and PlainPosting satisfy it."""
+
+    @property
+    def doc_id(self) -> int: ...
+    @property
+    def tf(self) -> int: ...
+    @property
+    def positions(self) -> tuple[int, ...]: ...
+
+
 # "array" representation: two parallel buffers of raw uint32 — (doc_ids, tfs)
-ArrayPostings = tuple[array, array]
-PostingList = list[Posting] | list[PlainPosting] | ArrayPostings
+type ArrayPostings = tuple[array[int], array[int]]
+type PostingList = list[PostingLike] | ArrayPostings
+
+
+def _new_arrays() -> ArrayPostings:
+    return array("I"), array("I")
 
 
 @dataclass(eq=False, repr=False)
-class Index(Mapping[str, list[Posting]]):
+class Index(Mapping[str, Sequence[PostingLike]]):
     """term -> postings. Behaves like a read-only dict thanks to the Mapping ABC.
 
     We implement the three abstract methods (__getitem__, __iter__, __len__); Mapping
@@ -78,17 +93,20 @@ class Index(Mapping[str, list[Posting]]):
     # Mapping defines __eq__, which makes Python set __hash__ = None (the hashing contract:
     # objects that compare equal must hash equal). An index is an identity object, so we
     # restore identity equality and hashing; that also lets lru_cache use it as a key.
-    __eq__ = object.__eq__
-    __hash__ = object.__hash__
+    def __eq__(self, other: object) -> bool:
+        return self is other
+
+    def __hash__(self) -> int:
+        return object.__hash__(self)
 
     # --- the Mapping protocol -----------------------------------------------------------
 
-    def __getitem__(self, term: str) -> list[Posting]:
+    def __getitem__(self, term: str) -> Sequence[PostingLike]:
         entry = self.postings[term]  # KeyError for unknown terms, as a dict would
-        if self.representation == "array":
-            ids, tfs = entry  # type: ignore[misc]
+        if isinstance(entry, tuple):  # "array" representation: build Postings on demand
+            ids, tfs = entry
             return [Posting(d, tf) for d, tf in zip(ids, tfs, strict=True)]
-        return entry  # type: ignore[return-value]
+        return entry
 
     def __iter__(self) -> Iterator[str]:
         return iter(self.postings)
@@ -128,7 +146,7 @@ class Index(Mapping[str, list[Posting]]):
         entry = self.postings.get(term)
         if entry is None:
             return 0
-        return len(entry[0]) if self.representation == "array" else len(entry)  # type: ignore[arg-type]
+        return len(entry[0]) if isinstance(entry, tuple) else len(entry)
 
     def close(self) -> None:
         """Release the postings (the big part) and mark the index unusable."""
@@ -146,19 +164,19 @@ class Index(Mapping[str, list[Posting]]):
         entry = self.postings.get(term)
         if entry is None:
             return ()
-        if self.representation == "array":
-            return entry[0]  # type: ignore[index]
-        return [p.doc_id for p in entry]  # type: ignore[union-attr]
+        if isinstance(entry, tuple):
+            return entry[0]
+        return [p.doc_id for p in entry]
 
     def entries(self, term: str) -> list[tuple[int, int]]:
         """(doc_id, tf) pairs for `term`, whatever the representation."""
         entry = self.postings.get(term)
         if entry is None:
             return []
-        if self.representation == "array":
-            ids, tfs = entry  # type: ignore[misc]
+        if isinstance(entry, tuple):
+            ids, tfs = entry
             return list(zip(ids, tfs, strict=True))
-        return [(p.doc_id, p.tf) for p in entry]  # type: ignore[union-attr]
+        return [(p.doc_id, p.tf) for p in entry]
 
 
 class _Titles:
@@ -178,7 +196,7 @@ class _Titles:
 
 
 @contextmanager
-def open_index(path: Path | str) -> Iterator[Index]:
+def open_index(path: Path | str) -> Generator[Index]:
     """`with open_index("index.pkl") as ix:` — the index is closed even if the body raises.
 
     Everything before `yield` is __enter__, everything after (the finally) is __exit__.
@@ -207,12 +225,9 @@ def build_index(
     if positions and representation == "array":
         raise ValueError("positions are only supported for the plain/slots representations")
 
-    postings: defaultdict[str, list] | defaultdict[str, ArrayPostings]
-    if representation == "array":
-        postings = defaultdict(lambda: (array("I"), array("I")))
-    else:
-        postings = defaultdict(list)
-    cls = Posting if representation == "slots" else PlainPosting
+    lists: defaultdict[str, list[PostingLike]] = defaultdict(list)
+    arrays: defaultdict[str, ArrayPostings] = defaultdict(_new_arrays)
+    cls: type[Posting | PlainPosting] = Posting if representation == "slots" else PlainPosting
 
     doc_lengths: dict[int, int] = {}
     doc_meta: dict[int, DocMeta] = {}
@@ -225,22 +240,24 @@ def build_index(
             for length, token in enumerate(tokenize(doc.text), start=1):
                 offsets[token].append(length - 1)
             for term, offs in offsets.items():
-                postings[term].append(cls(doc_id, len(offs), tuple(offs)))
+                lists[term].append(cls(doc_id, len(offs), tuple(offs)))
         else:
             counts = Counter(tokenize(doc.text))
             length = counts.total()
             for term, tf in counts.items():
                 if representation == "array":
-                    ids, tfs = postings[term]
+                    ids, tfs = arrays[term]
                     ids.append(doc_id)
                     tfs.append(tf)
                 else:
-                    postings[term].append(cls(doc_id, tf))
+                    lists[term].append(cls(doc_id, tf))
         doc_lengths[doc_id] = length
         doc_meta[doc_id] = DocMeta(doc_id, doc.doc_id, str(doc.path), titles.get(doc))
 
-    # plain dict: no default factory surprises at query time, and a lambda can't be pickled
-    return Index(representation, dict(postings), doc_lengths, doc_meta, positions)
+    # plain dict: no default factory surprises at query time
+    postings: dict[str, PostingList] = {}
+    postings.update(arrays if representation == "array" else lists)
+    return Index(representation, postings, doc_lengths, doc_meta, positions)
 
 
 def main(argv: list[str] | None = None) -> int:

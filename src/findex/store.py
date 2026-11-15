@@ -18,7 +18,7 @@ from array import array
 from pathlib import Path
 from typing import Any
 
-from findex.index import DocMeta, Index, PlainPosting, Posting
+from findex.index import DocMeta, Index, PlainPosting, Posting, PostingList, Representation
 from findex.timing import timed
 
 JSON_FORMAT_VERSION = 1
@@ -47,16 +47,18 @@ def load(path: Path) -> Index:
 
 
 def _save_json(index: Index, path: Path) -> None:
-    postings: dict[str, list[Any]] = {}
-    for term in index.postings:
-        entry = index.postings[term]
-        if index.representation == "array":
-            ids, tfs = entry  # type: ignore[misc]
+    postings: dict[str, list[list[int]] | list[list[int] | list[list[int]]]] = {}
+    for term, entry in index.postings.items():
+        if isinstance(entry, tuple):  # array representation
+            ids, tfs = entry
             postings[term] = [ids.tolist(), tfs.tolist()]
         else:
-            col: list[Any] = [[p.doc_id for p in entry], [p.tf for p in entry]]  # type: ignore[union-attr]
+            col: list[list[int] | list[list[int]]] = [
+                [p.doc_id for p in entry],
+                [p.tf for p in entry],
+            ]
             if index.has_positions:
-                col.append([list(p.positions) for p in entry])  # type: ignore[union-attr]
+                col.append([list(p.positions) for p in entry])
             postings[term] = col
     payload = {
         "version": JSON_FORMAT_VERSION,
@@ -74,21 +76,23 @@ def _save_json(index: Index, path: Path) -> None:
 
 def _load_json(path: Path) -> Index:
     with path.open(encoding="utf-8") as f:
-        payload = json.load(f)
+        payload: dict[str, Any] = json.load(f)  # Any: JSON has no static schema
     if payload.get("version") != JSON_FORMAT_VERSION:
         raise ValueError(f"unsupported index format version in {path}")
-    representation = payload["representation"]
-    has_positions = payload["has_positions"]
+    representation: Representation = payload["representation"]
+    has_positions: bool = payload["has_positions"]
 
     doc_meta: dict[int, DocMeta] = {}
     doc_lengths: dict[int, int] = {}
-    for doc_id, name, doc_path, title, length in payload["docs"]:
+    docs: list[list[Any]] = payload["docs"]
+    for doc_id, name, doc_path, title, length in docs:
         doc_meta[doc_id] = DocMeta(doc_id, name, doc_path, title)
         doc_lengths[doc_id] = length
 
-    postings: dict[str, Any] = {}
-    cls = Posting if representation == "slots" else PlainPosting
-    for term, col in payload["postings"].items():
+    postings: dict[str, PostingList] = {}
+    cls: type[Posting | PlainPosting] = Posting if representation == "slots" else PlainPosting
+    columns: dict[str, list[list[Any]]] = payload["postings"]
+    for term, col in columns.items():
         if representation == "array":
             postings[term] = (array("I", col[0]), array("I", col[1]))
         elif has_positions:

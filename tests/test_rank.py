@@ -4,8 +4,8 @@ from pathlib import Path
 import pytest
 
 from findex.corpus import Document
-from findex.index import Posting, build_index
-from findex.rank import BM25, SearchResult, TfIdf, match, search
+from findex.index import Index, Posting, build_index
+from findex.rank import BM25, SearchResult, TfIdf, cache_hits, match, search
 from findex.snippets import snippet
 from findex.timing import timed
 
@@ -20,17 +20,17 @@ DOCS = [
 
 
 @pytest.fixture(scope="module")
-def index():
+def index() -> Index:
     return build_index(DOCS, positions=True)
 
 
-def test_rare_term_outranks_common_one(index) -> None:
+def test_rare_term_outranks_common_one(index: Index) -> None:
     results = search(index, "the OR zebra", BM25())
     assert {r.doc_id for r in results[:2]} == {0, 1}  # zebra docs first
     assert results[0].score > max(r.score for r in results if r.doc_id == 2)
 
 
-def test_bm25_saturates_tf(index) -> None:
+def test_bm25_saturates_tf(index: Index) -> None:
     bm25, tfidf = BM25(), TfIdf()
     gain = [bm25.score("dog", Posting(3, tf), index) for tf in (1, 2, 19, 20)]
     assert gain[1] - gain[0] > 10 * (gain[3] - gain[2])
@@ -40,7 +40,7 @@ def test_bm25_saturates_tf(index) -> None:
     assert tfidf.score("dog", Posting(3, 20), index) > 3 * tfidf.score("dog", Posting(3, 1), index)
 
 
-def test_bm25_prefers_short_document(index) -> None:
+def test_bm25_prefers_short_document(index: Index) -> None:
     results = search(index, "zebra", BM25())
     assert [r.doc_id for r in results] == [0, 1]
     assert results[0].score > results[1].score
@@ -48,26 +48,25 @@ def test_bm25_prefers_short_document(index) -> None:
     assert no_norm[0].score == pytest.approx(no_norm[1].score)  # b=0: length ignored
 
 
-def test_top_k_and_ordering(index) -> None:
+def test_top_k_and_ordering(index: Index) -> None:
     results = search(index, "the", k=2)
     assert len(results) == 2
     assert sorted(results, reverse=True) == results
     assert SearchResult(1.0, 5, "x") < SearchResult(2.0, 0, "a")
 
 
-def test_empty_and_negated_queries(index) -> None:
+def test_empty_and_negated_queries(index: Index) -> None:
     assert search(index, "") == []
     assert search(index, "unicorn") == []
     only_not = search(index, "NOT the")
     assert only_not == []  # every document contains "the"
 
 
-def test_repeated_query_hits_cache(index) -> None:
+def test_repeated_query_hits_cache(index: Index) -> None:
     match(index, "zebra OR cat")
-    before = match.__wrapped__.__globals__["_match_cached"].cache_info().hits
+    before = cache_hits()
     match(index, "zebra OR cat")
-    after = match.__wrapped__.__globals__["_match_cached"].cache_info().hits
-    assert after == before + 1
+    assert cache_hits() == before + 1
 
 
 def test_timed_preserves_metadata_and_logs(caplog: pytest.LogCaptureFixture) -> None:

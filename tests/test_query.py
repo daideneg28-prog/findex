@@ -3,8 +3,8 @@ from pathlib import Path
 import pytest
 
 from findex.corpus import Document
-from findex.index import build_index
-from findex.query import And, Not, Or, Phrase, QuerySyntaxError, Term, parse
+from findex.index import Index, build_index
+from findex.query import And, Node, Not, Or, Phrase, QuerySyntaxError, Term, parse
 
 a, b, c = Term("a"), Term("b"), Term("c")
 
@@ -27,7 +27,7 @@ a, b, c = Term("a"), Term("b"), Term("c")
         ('"a"', a),
     ],
 )
-def test_parse_trees(query: str, tree) -> None:
+def test_parse_trees(query: str, tree: Node) -> None:
     assert parse(query) == tree
 
 
@@ -49,7 +49,7 @@ DOCS = [
 
 
 @pytest.fixture(scope="module")
-def index():
+def index() -> Index:
     return build_index(DOCS, positions=True)
 
 
@@ -69,7 +69,7 @@ def index():
         ("unicorn", []),
     ],
 )
-def test_evaluate(index, query: str, expected: list[int]) -> None:
+def test_evaluate(index: Index, query: str, expected: list[int]) -> None:
     assert parse(query).evaluate(index) == expected
 
 
