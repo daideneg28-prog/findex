@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 
 from findex.corpus import Document
-from findex.index import REPRESENTATIONS, DocMeta, Posting, build_index
-from findex.search import difference, intersect, parse, search, union
+from findex.index import REPRESENTATIONS, DocMeta, Posting, build_index, open_index
+from findex.merge import ENGINES, difference, intersect, union
 from findex.store import load, save
 
 DOCS = [
@@ -29,6 +29,29 @@ def test_postings_sorted_with_tf(index) -> None:
     assert index.doc_meta[1].name == "b"
 
 
+def test_mapping_protocol(index) -> None:
+    assert len(index) == len(index.postings)
+    assert "whale" in index and "unicorn" not in index
+    assert [(p.doc_id, p.tf) for p in index["whale"]] == [(0, 1), (2, 2)]
+    with pytest.raises(KeyError):
+        index["unicorn"]
+    assert set(index) == set(index.postings)
+    assert index.get("unicorn") is None  # inherited from Mapping
+    assert repr(index).startswith("Index(4 docs, ")
+
+
+def test_statistics(index) -> None:
+    assert index.num_docs == 4
+    assert index.avg_doc_length == pytest.approx(19 / 4)
+    assert index.doc_length(1) == 6
+    assert index.df("whale") == 2 and index.df("unicorn") == 0
+
+
+def test_index_is_hashable_by_identity(index) -> None:
+    assert len({index, index}) == 1
+    assert index != build_index(DOCS, index.representation)
+
+
 def test_dataclasses_are_hashable() -> None:
     assert len({Posting(1, 2), Posting(1, 2), Posting(2, 1)}) == 2
     assert hash(DocMeta(0, "a", "a.txt", "A")) == hash(DocMeta(0, "a", "a.txt", "A"))
@@ -37,7 +60,7 @@ def test_dataclasses_are_hashable() -> None:
 
 def test_positions() -> None:
     idx = build_index(DOCS, "slots", positions=True)
-    assert idx.postings["whale"][1].positions == (1, 3)  # type: ignore[union-attr]
+    assert idx["whale"][1].positions == (1, 3)
     with pytest.raises(ValueError):
         build_index(DOCS, "array", positions=True)
 
@@ -47,29 +70,20 @@ def test_positions() -> None:
     [([], []), ([1, 3, 5], [2, 3, 4, 5]), ([0, 1, 2], [7, 8]), ([4], [4])],
 )
 def test_merges_match_sets(a: list[int], b: list[int]) -> None:
-    assert intersect(a, b) == sorted(set(a) & set(b))
-    assert union(a, b) == sorted(set(a) | set(b))
-    assert difference(a, b) == sorted(set(a) - set(b))
+    assert intersect(a, b) == sorted(set(a) & set(b)) == ENGINES["set"]["AND"](a, b)
+    assert union(a, b) == sorted(set(a) | set(b)) == ENGINES["set"]["OR"](a, b)
+    assert difference(a, b) == sorted(set(a) - set(b)) == ENGINES["set"]["NOT"](a, b)
 
 
-def test_parse() -> None:
-    assert parse("Whale, ship OR sea NOT captain") == [
-        ("AND", ["whale"]),
-        ("AND", ["ship"]),
-        ("OR", ["sea"]),
-        ("NOT", ["captain"]),
-    ]
-
-
-@pytest.mark.parametrize("engine", ["merge", "set"])
-def test_boolean_queries(index, engine) -> None:
-    assert search(index, "whale", engine) == [0, 2]
-    assert search(index, "whale ship", engine) == [0]
-    assert search(index, "whale OR captain", engine) == [0, 1, 2]
-    assert search(index, "ship NOT captain", engine) == [0]
-    assert search(index, "NOT the", engine) == [1, 3]
-    assert search(index, "unicorn", engine) == []
-    assert search(index, "", engine) == []
+def test_open_index_closes_even_on_error(tmp_path: Path) -> None:
+    path = tmp_path / "ix.pkl"
+    save(build_index(DOCS), path)
+    with open_index(path) as ix:
+        assert "whale" in ix
+    assert ix.closed and len(ix) == 0
+    with pytest.raises(RuntimeError), open_index(path) as ix2:
+        raise RuntimeError("boom")
+    assert ix2.closed
 
 
 def test_cli_pickle_is_loadable(tmp_path: Path) -> None:
@@ -83,7 +97,7 @@ def test_cli_pickle_is_loadable(tmp_path: Path) -> None:
         check=True,
         capture_output=True,
     )
-    assert search(load(out), "whale") == [0]
+    assert list(load(out).doc_ids("whale")) == [0]
 
 
 @pytest.mark.parametrize("suffix", [".pkl", ".json"])

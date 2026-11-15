@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from findex.index import DocMeta, Index, PlainPosting, Posting
+from findex.timing import timed
 
 JSON_FORMAT_VERSION = 1
 
@@ -32,6 +33,7 @@ def save(index: Index, path: Path) -> None:
             pickle.dump(index, f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
+@timed
 def load(path: Path) -> Index:
     path = Path(path)
     if path.suffix == ".json":

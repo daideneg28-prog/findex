@@ -1,6 +1,6 @@
 """Inverted index: term -> postings sorted by doc_id, built in one streaming pass.
 
-python -m findex.index data/ --out index.pkl [--repr slots|plain|array] [--positions]
+python -m findex.index data/ --out index.pkl [--repr slots|plain|array] [--no-positions]
 """
 
 from __future__ import annotations
@@ -11,13 +11,16 @@ import time
 import tracemalloc
 from array import array
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from functools import cached_property
 from itertools import islice
 from pathlib import Path
 from typing import Literal
 
 from findex.corpus import Document, iter_documents
+from findex.timing import timed
 from findex.tokenize import tokenize
 
 Representation = Literal["plain", "slots", "array"]
@@ -55,21 +58,88 @@ ArrayPostings = tuple[array, array]
 PostingList = list[Posting] | list[PlainPosting] | ArrayPostings
 
 
-@dataclass
-class Index:
+@dataclass(eq=False, repr=False)
+class Index(Mapping[str, list[Posting]]):
+    """term -> postings. Behaves like a read-only dict thanks to the Mapping ABC.
+
+    We implement the three abstract methods (__getitem__, __iter__, __len__); Mapping
+    then supplies keys(), items(), values(), get() and __eq__ for free. __contains__ is
+    overridden because Mapping's default calls __getitem__, which for the "array"
+    representation would build a whole list just to answer yes/no.
+    """
+
     representation: Representation
     postings: dict[str, PostingList]
     doc_lengths: dict[int, int]
     doc_meta: dict[int, DocMeta]
     has_positions: bool = False
+    closed: bool = field(default=False, compare=False)
+
+    # Mapping defines __eq__, which makes Python set __hash__ = None (the hashing contract:
+    # objects that compare equal must hash equal). An index is an identity object, so we
+    # restore identity equality and hashing; that also lets lru_cache use it as a key.
+    __eq__ = object.__eq__
+    __hash__ = object.__hash__
+
+    # --- the Mapping protocol -----------------------------------------------------------
+
+    def __getitem__(self, term: str) -> list[Posting]:
+        entry = self.postings[term]  # KeyError for unknown terms, as a dict would
+        if self.representation == "array":
+            ids, tfs = entry  # type: ignore[misc]
+            return [Posting(d, tf) for d, tf in zip(ids, tfs, strict=True)]
+        return entry  # type: ignore[return-value]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.postings)
+
+    def __len__(self) -> int:
+        """Number of distinct terms (so `len(index)` is the vocabulary size)."""
+        return len(self.postings)
+
+    def __contains__(self, term: object) -> bool:
+        return term in self.postings
+
+    def __repr__(self) -> str:
+        state = ", closed" if self.closed else ""
+        return (
+            f"Index({self.num_docs:,} docs, {len(self):,} terms, "
+            f"representation={self.representation!r}, positions={self.has_positions}{state})"
+        )
+
+    # --- statistics used by the scorers -------------------------------------------------
 
     @property
-    def n_docs(self) -> int:
+    def num_docs(self) -> int:
         return len(self.doc_meta)
+
+    n_docs = num_docs  # Lab 2 name
+
+    @cached_property
+    def avg_doc_length(self) -> float:
+        """Computed once on first access, then stored in the instance __dict__."""
+        return sum(self.doc_lengths.values()) / self.num_docs if self.num_docs else 0.0
+
+    def doc_length(self, doc_id: int) -> int:
+        return self.doc_lengths[doc_id]
+
+    def df(self, term: str) -> int:
+        """Document frequency: in how many documents `term` occurs."""
+        entry = self.postings.get(term)
+        if entry is None:
+            return 0
+        return len(entry[0]) if self.representation == "array" else len(entry)  # type: ignore[arg-type]
+
+    def close(self) -> None:
+        """Release the postings (the big part) and mark the index unusable."""
+        self.postings = {}
+        self.closed = True
+
+    # --- Lab 2 helpers ------------------------------------------------------------------
 
     @property
     def n_postings(self) -> int:
-        return sum(len(self.doc_ids(term)) for term in self.postings)
+        return sum(self.df(term) for term in self.postings)
 
     def doc_ids(self, term: str) -> Sequence[int]:
         """Sorted doc_ids that contain `term` (empty if the term is unknown)."""
@@ -107,6 +177,22 @@ class _Titles:
         return self._cache[folder].get(doc.doc_id, doc.doc_id)
 
 
+@contextmanager
+def open_index(path: Path | str) -> Iterator[Index]:
+    """`with open_index("index.pkl") as ix:` — the index is closed even if the body raises.
+
+    Everything before `yield` is __enter__, everything after (the finally) is __exit__.
+    """
+    from findex.store import load  # local import: store imports this module
+
+    index = load(Path(path))
+    try:
+        yield index
+    finally:
+        index.close()
+
+
+@timed
 def build_index(
     docs: Iterable[Document],
     representation: Representation = "slots",
@@ -164,7 +250,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("root", type=Path, help="corpus directory or .txt/.jsonl file")
     parser.add_argument("--out", type=Path, required=True, help="index file (.pkl or .json)")
     parser.add_argument("--repr", choices=REPRESENTATIONS, default="slots", dest="representation")
-    parser.add_argument("--positions", action="store_true", help="store token positions")
+    parser.add_argument(
+        "--positions",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="store token positions (needed for phrase queries; default since Lab 3)",
+    )
     parser.add_argument("--limit", type=int, default=None, help="only the first N documents")
     args = parser.parse_args(argv)
 

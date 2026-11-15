@@ -192,3 +192,126 @@ JSON тут виграв за всіма показниками, бо форма
 бо `set` платить фіксовану ціну за створення двох множин. Злиття лишається основним рушієм з причин, які важать більше
 за швидкість у CPython: воно потокове, не потребує пам'яті під хеш-таблиці, працює зі стиснутими списками й розширюється до
 фразового пошуку в Лаб 3. Перевагу C-коду для довгих списків повернемо в Лаб 8 через NumPy.
+
+> Починаючи з Лаб 3 CLI пошуку змінився (ранжування замість булевого списку), а операції злиття переїхали в `findex/merge.py`.
+> Стан коду саме Лаб 2 доступний за тегом `lab-02`.
+
+---
+
+## Лаб 3: модель об'єктів, ранжування, мова запитів
+
+**Що зроблено**
+
+| Модуль | Що робить |
+|---|---|
+| `src/findex/index.py` | `Index` успадковує `collections.abc.Mapping[str, list[Posting]]`. Реалізовані `__getitem__` (`KeyError` для невідомого терма), `__iter__`, `__len__` (розмір словника), швидкий `__contains__` і `__repr__`. `keys/items/values/get` дає `Mapping`. Є `num_docs`, `avg_doc_length` (`@cached_property`), `doc_length()`, `df()`. `open_index(path)` — контекстний менеджер через `@contextmanager`: індекс закривається навіть при винятку. |
+| `src/findex/rank.py` | Протокол `Scorer` (`typing.Protocol`, структурна типізація без наслідування) і дві реалізації: `TfIdf` і `BM25(k1=1.5, b=0.75)`. `search()` накопичує бали в словнику й бере top-k через `heapq.nlargest`. Результати — `SearchResult` з `order=True`. Співставлення запиту кешується через `@lru_cache(maxsize=256)`. |
+| `src/findex/query.py` | Рекурсивний спуск: `or_expr → and_expr ("OR" and_expr)*`, `and_expr → not_expr (["AND"] not_expr)*`, `not_expr → "NOT" not_expr \| atom`, `atom → слово \| "фраза" \| ( or_expr )`. Вузли `Term`, `Phrase`, `And`, `Or`, `Not` — frozen dataclass-и з перевантаженими `&`, `\|`, `~` і методом `evaluate(index)`. Фрази шукаються злиттям двома вказівниками по **позиціях**. |
+| `src/findex/timing.py` | Декоратор `@timed` з `functools.wraps`; стоїть на `build_index`, `load`, `search`, `match`. |
+| `src/findex/snippets.py` | Вікно ±80 символів навколо місця, де зібралося найбільше **різних** термів запиту, з підсвіткою `«терм»`. |
+| `scripts/eval_lab03.py` | Три перевірки адекватності ранжування і precision@5 нижче. |
+| `tests/test_query.py`, `tests/test_rank.py` | Тести парсера **як дерева** (`parse("a OR b c") == Or(Term("a"), And(Term("b"), Term("c")))`), обчислення запитів і фраз, усі три перевірки на мініатюрному корпусі, кеш, `@timed`, сніпети. Усього в проєкті 76 тестів. |
+
+Індекс тепер за замовчуванням будується **з позиціями** (`--no-positions` вимикає). Без позицій фраза
+деградує до AND з попередженням у лозі.
+
+```
+$ uv run python -m findex.search data/index.pkl 'tarzan "the apes" NOT jane' '"white whale" ahab' \
+      '(huck OR huckleberry) "tom sawyer"' 'tarzan "the apes" NOT jane' -k 3
+  [log] load took 3580.39 ms
+  [log] match took 27.73 ms        ← перший запит: парсинг + обчислення фрази
+  [log] search took 27.94 ms
+  ...
+  [log] match took 0.00 ms         ← той самий запит удруге: результат з lru_cache
+  [log] search took 0.12 ms
+Index(150 docs, 200,251 terms, representation='slots', positions=True)
+
+=== 'tarzan "the apes" NOT jane' (bm25)
+  1 documents match; top 1:
+   1.  12.346  Jungle Tales of Tarzan
+      …«the» shade of «the» tropical forest, presented, unquestionably, a most alluring picture of young,
+      feminine loveliness. Or at least so thought «Tarzan» of «the» «Apes»…
+
+=== '"white whale" ahab' (bm25)
+   1.  13.855  Moby-Dick; or, The Whale
+      …queer about that, eh? A «white» «whale»—did ye mark that, man? Look ye—there's something special in
+      the wind. Stand by for it, Flask. «Ahab» has that that's bloody…
+
+=== '(huck OR huckleberry) "tom sawyer"' (bm25)
+  5 documents match; top 3:
+   1.  24.616  The Adventures of Tom Sawyer, Complete
+   2.  23.309  Adventures of Huckleberry Finn
+   3.  17.017  Tom Sawyer, Detective
+
+query cache: 5 hits, 3 misses, 3 cached
+```
+
+(У PowerShell 5.1 лапки всередині аргументу треба писати як `\"`, інакше оболонка їх прибирає.)
+
+### Формули
+
+- **TF-IDF**: `(1 + ln tf) · ln(N / df)`.
+- **BM25**: `idf · tf·(k1+1) / (tf + k1·(1 − b + b·|d|/avgdl))`, де `idf = ln(1 + (N − df + 0.5)/(df + 0.5))`.
+
+### Три перевірки адекватності на корпусі
+
+**1. Рідкісний терм важить більше за частий.** Запит `the OR ahab` (BM25):
+
+| Бал | Документ |
+|---:|---|
+| 8.736 | Moby-Dick; or, The Whale |
+| 7.934 | The King James Version of the Bible |
+| 7.907 | The Bible, King James Version, Complete |
+| 5.659 | … найкращий документ лише зі словом `the`: Paradise Regained |
+
+`idf(the) = 0.0033` (слово є в усіх 150 книгах), `idf(ahab) = 3.51`. Обидві Біблії тут правомірно: там є цар Ахав.
+
+**2. BM25 насичується за частотою терма.** Внесок `whale` для документа середньої довжини:
+
+| tf | BM25 | TF-IDF |
+|---:|---:|---:|
+| 1 | 1.931 | 1.920 |
+| 2 | 2.748 | 3.250 |
+| 5 | 3.681 | 5.009 |
+| 10 | 4.151 | 6.340 |
+| 19 | 4.419 | 7.572 |
+| **20** | **4.435** (+0.016) | 7.670 (+0.098) |
+| 100 | 4.691 | 10.760 |
+
+Двадцяте входження додає до BM25 лише 0.016, а межа при `tf → ∞` дорівнює `idf·(k1+1) = 4.759`. TF-IDF росте без обмежень,
+тому в «Мобі Діку» (`tf(whale) = 1116`) TF-IDF дав би слову whale величезну вагу.
+
+**3. Нормалізація довжини.** Терм `rich'd` трапляється рівно один раз у двох документах:
+
+| Документ | Довжина | BM25 | TF-IDF |
+|---|---:|---:|---:|
+| The United States Constitution | 4 727 токенів | **7.179** | 4.317 |
+| The Complete Works of William Shakespeare | 968 609 токенів | 0.837 | 4.317 |
+
+Для TF-IDF ці документи однакові. BM25 розуміє, що одне слово в коротенькому тексті значить більше, ніж те саме слово,
+загублене серед мільйона інших. При `b = 0` різниця зникає (це перевіряє тест `test_bm25_prefers_short_document`).
+
+### precision@5: TF-IDF проти BM25
+
+10 запитів, релевантні книги розмічені вручну за змістом (список у `scripts/eval_lab03.py`). Терми запиту з'єднані `OR`,
+щоб збіг не вимагав усіх слів одночасно.
+
+| Запит | Релевантних | TF-IDF P@5 | BM25 P@5 |
+|---|---:|---:|---:|
+| `tarzan apes jungle` | 6 | 1.0 | 1.0 |
+| `barsoom martian princess` | 4 | 0.8 | 0.8 |
+| `tom sawyer huck` | 4 | 0.8 | 0.8 |
+| `anne gilbert avonlea` | 3 | 0.6 | 0.6 |
+| `internet email network` | 7 | 0.8 | 0.8 |
+| `population gdp exports` | 4 | 0.8 | 0.8 |
+| `dorothy oz scarecrow` | 2 | 0.4 | 0.4 |
+| `inaugural address fellow citizens` | 4 | 0.0 | **0.8** |
+| `sara crewe minchin` | 2 | 0.4 | 0.4 |
+| `paradise satan eden` | 3 | 0.4 | **0.6** |
+| **середнє** | | **0.60** | **0.70** |
+
+Для запитів, де релевантних книг менше п'яти, максимум P@5 обмежений: 2 релевантні дають не більше 0.4, 3 — не більше 0.6.
+На них обидва скорери досягли стелі. Різниця лише у двох запитах, і обидва раз пояснюються **нормалізацією довжини**.
+Інавгураційні промови займають кілька сторінок, тож за TF-IDF їх витісняють товсті томи, де «fellow citizens» трапляється
+випадково (переписи, «Федераліст»). BM25 піднімає короткі документи, в яких ці слова щільні. Вибірка мала й шумна,
+тож висновок обережний: на цьому корпусі BM25 не гірший ніде і кращий там, де довжина документів дуже різна.
