@@ -1,6 +1,7 @@
 """The `findex` command-line app (typer + rich).
 
     findex [-v|-vv] index  <corpus> --out index.pkl [--no-positions] [--limit N]
+                           [--executor serial|threads|processes] [--workers N]
     findex [-v|-vv] search <index> "<query>" [-k 10] [--scorer bm25|tfidf] [--json]
     findex [-v|-vv] stats  <index> [--top 20]
 
@@ -27,8 +28,9 @@ from rich.table import Table
 from rich.text import Text
 
 from findex import __version__
-from findex.corpus import iter_documents
-from findex.index import REPRESENTATIONS, Representation, build_index, open_index
+from findex.corpus import iter_paths
+from findex.index import REPRESENTATIONS, Representation, open_index
+from findex.parallel import EXECUTORS, Executor, build_from_paths
 from findex.query import QuerySyntaxError
 from findex.rank import SCORERS, match, search
 from findex.snippets import snippet
@@ -60,9 +62,21 @@ class Repr(StrEnum):
     array = "array"
 
 
+class ExecutorName(StrEnum):
+    serial = "serial"
+    threads = "threads"
+    processes = "processes"
+
+
 # typer needs an Enum for choices; the library API takes the Literal type
 _REPRS: dict[Repr, Representation] = {Repr.slots: "slots", Repr.plain: "plain", Repr.array: "array"}
 assert set(_REPRS.values()) == set(REPRESENTATIONS)
+_EXECUTORS: dict[ExecutorName, Executor] = {
+    ExecutorName.serial: "serial",
+    ExecutorName.threads: "threads",
+    ExecutorName.processes: "processes",
+}
+assert set(_EXECUTORS.values()) == set(EXECUTORS)
 
 
 def _configure_logging(verbosity: int) -> None:
@@ -99,25 +113,36 @@ def index_cmd(
     corpus: Annotated[Path, typer.Argument(exists=True, help="directory of .txt/.jsonl files")],
     out_path: Annotated[Path, typer.Option("--out", "-o", help="index file (.pkl or .json)")],
     positions: Annotated[bool, typer.Option(help="store token positions (phrases)")] = True,
-    limit: Annotated[int | None, typer.Option(help="only the first N documents")] = None,
+    limit: Annotated[int | None, typer.Option(help="only the first N files")] = None,
     representation: Annotated[Repr, typer.Option("--repr")] = Repr.slots,
+    executor: Annotated[
+        ExecutorName, typer.Option(help="where build_partial runs (see README, Lab 5)")
+    ] = ExecutorName.processes,
+    workers: Annotated[
+        int | None, typer.Option(min=1, help="pool size (default: os.cpu_count())")
+    ] = None,
 ) -> None:
-    """Build an index from a corpus and save it."""
+    """Build an index from a corpus and save it (map-reduce over chunks of files)."""
     rep = _REPRS[representation]
-    total = sum(1 for _ in corpus.rglob("*.txt")) if corpus.is_dir() else None
-    if limit is not None and total is not None:
-        total = min(total, limit)
+    paths = list(islice(iter_paths(corpus), limit))
     progress = Progress(
-        TextColumn("[bold]indexing"),
+        TextColumn(f"[bold]indexing[/] ({executor.value})"),
         BarColumn(),
         MofNCompleteColumn(),
         TimeElapsedColumn(),
         console=err,
     )
     with progress:
-        docs = progress.track(islice(iter_documents(corpus), limit), total=total)
+        task = progress.add_task("files", total=len(paths))
         try:
-            index = build_index(docs, rep, positions)
+            index = build_from_paths(
+                paths,
+                executor=_EXECUTORS[executor],
+                workers=workers,
+                representation=rep,
+                positions=positions,
+                progress=lambda n: progress.advance(task, n),
+            )
         except ValueError as exc:
             err.print(f"[red]error:[/] {exc}")
             raise typer.Exit(2) from exc

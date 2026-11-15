@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from findex import __version__
@@ -39,6 +40,19 @@ def test_index_limit_and_json_format(corpus_dir: Path, tmp_path: Path) -> None:
     )
     assert result.exit_code == 0, result.output
     assert load(out).num_docs == 2
+
+
+@pytest.mark.parametrize("executor", ["serial", "threads", "processes"])
+def test_index_executors_write_identical_files(
+    corpus_dir: Path, tmp_path: Path, executor: str
+) -> None:
+    out = tmp_path / f"{executor}.pkl"
+    args = ["index", str(corpus_dir), "-o", str(out), "--executor", executor, "--workers", "2"]
+    result = runner.invoke(app, args)
+    assert result.exit_code == 0, result.output
+    reference = tmp_path / "reference.pkl"
+    runner.invoke(app, ["index", str(corpus_dir), "-o", str(reference), "--executor", "serial"])
+    assert out.read_bytes() == reference.read_bytes()
 
 
 def test_index_rejects_array_with_positions(corpus_dir: Path, tmp_path: Path) -> None:

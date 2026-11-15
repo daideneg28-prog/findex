@@ -41,16 +41,36 @@ def _iter_jsonl(path: Path) -> Iterator[Document]:
             yield Document(doc_id, path, str(obj.get("text", "")))
 
 
+SUFFIXES = (".txt", ".jsonl")
+
+
+def iter_paths(root: Path) -> Iterator[Path]:
+    """Corpus files under `root` (or `root` itself if it is a file), in a fixed order.
+
+    The order defines doc_ids, so both the serial and the parallel indexer use this.
+    """
+    root = Path(root)
+    if root.is_file():
+        yield root
+        return
+    for path in root.rglob("*"):
+        if path.suffix in SUFFIXES and path.is_file():
+            yield path
+
+
+def iter_file(path: Path) -> Iterator[Document]:
+    """The documents of one corpus file: one for .txt, one per line for .jsonl."""
+    if path.suffix == ".txt":
+        yield Document(path.stem, path, _read_text(path))
+    elif path.suffix == ".jsonl":
+        yield from _iter_jsonl(path)
+
+
 def iter_documents(root: Path) -> Iterator[Document]:
     """Yield documents under `root` one at a time.
 
     `root` may be a directory (every *.txt and *.jsonl below it, found lazily
     with rglob) or a single .txt / .jsonl file.
     """
-    root = Path(root)
-    paths = [root] if root.is_file() else root.rglob("*")
-    for path in paths:
-        if path.suffix == ".txt":
-            yield Document(path.stem, path, _read_text(path))
-        elif path.suffix == ".jsonl":
-            yield from _iter_jsonl(path)
+    for path in iter_paths(root):
+        yield from iter_file(path)

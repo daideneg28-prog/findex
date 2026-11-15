@@ -179,7 +179,7 @@ class Index(Mapping[str, Sequence[PostingLike]]):
         return [(p.doc_id, p.tf) for p in entry]
 
 
-class _Titles:
+class Titles:
     """Looks up book titles in a titles.json next to the documents (written by the downloader)."""
 
     def __init__(self) -> None:
@@ -231,7 +231,7 @@ def build_index(
 
     doc_lengths: dict[int, int] = {}
     doc_meta: dict[int, DocMeta] = {}
-    titles = _Titles()
+    titles = Titles()
 
     for doc_id, doc in enumerate(docs):
         if positions:
