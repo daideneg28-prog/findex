@@ -23,7 +23,7 @@ from contextlib import aclosing
 from enum import StrEnum
 from itertools import islice
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 from rich.console import Console
@@ -42,6 +42,10 @@ from findex.query import QuerySyntaxError
 from findex.rank import SCORERS, match, search
 from findex.snippets import snippet
 from findex.store import save
+from findex.tokenize import tokenize
+
+if TYPE_CHECKING:
+    from findex.semantic import Mode
 
 app = typer.Typer(
     name="findex",
@@ -67,6 +71,19 @@ class Repr(StrEnum):
     slots = "slots"
     plain = "plain"
     array = "array"
+
+
+class ModeName(StrEnum):
+    keyword = "keyword"
+    semantic = "semantic"
+    hybrid = "hybrid"
+
+
+_MODES: dict[ModeName, Mode] = {
+    ModeName.keyword: "keyword",
+    ModeName.semantic: "semantic",
+    ModeName.hybrid: "hybrid",
+}
 
 
 class ExecutorName(StrEnum):
@@ -178,28 +195,47 @@ def search_cmd(
     scorer: Annotated[ScorerName, typer.Option(help="ranking function")] = ScorerName.bm25,
     as_json: Annotated[bool, typer.Option("--json", help="JSON lines on stdout")] = False,
     snippets: Annotated[bool, typer.Option(help="show text snippets")] = True,
+    mode: Annotated[ModeName, typer.Option(help="keyword (BM25), semantic, or hybrid (RRF)")] = (
+        ModeName.keyword
+    ),
+    embeddings: Annotated[
+        Path | None, typer.Option(help="embeddings folder (default: <index>.emb)")
+    ] = None,
 ) -> None:
     """Search an index; prints a ranked table (or JSON lines)."""
     with open_index(index_path) as index:
+        hits: list[tuple[int, float]]
         try:
-            results = search(index, query, SCORERS[scorer.value], k)
+            if mode is ModeName.keyword:
+                results = search(index, query, SCORERS[scorer.value], k)
+                hits = [(r.doc_id, r.score) for r in results]
+                matched, terms = match(index, query) if query.strip() else ((), ())
+            else:
+                from findex.semantic import SemanticIndex, ranked
+
+                folder = embeddings or index_path.with_suffix(".emb")
+                if not (folder / "meta.json").exists():
+                    err.print(f"[red]error:[/] no embeddings in {folder}; run `findex embed` first")
+                    raise typer.Exit(2)
+                semantic = SemanticIndex.load(folder)
+                hits = ranked(index, query, _MODES[mode], semantic, k, scorer.value)
+                matched, terms = tuple(d for d, _ in hits), tuple(tokenize(query))
         except QuerySyntaxError as exc:
             err.print(f"[red]query error:[/] {exc}")
             raise typer.Exit(1) from exc
-        matched, terms = match(index, query) if query.strip() else ((), ())
         log.info("%d documents match %r", len(matched), query)
 
         rows: list[tuple[int, float, str, str]] = []
-        for rank, r in enumerate(results, start=1):
+        for rank, (doc_id, score) in enumerate(hits, start=1):
             snip = ""
+            meta = index.doc_meta[doc_id]
             if snippets:
-                meta = index.doc_meta[r.doc_id]
                 path = Path(meta.path)
                 try:
                     snip = snippet(read_document(path, meta.name), terms, mark=_MARK)
                 except OSError:
                     log.warning("cannot read %s for a snippet", path)
-            rows.append((rank, r.score, r.title, snip))
+            rows.append((rank, score, meta.title, snip))
 
         if as_json:
             for rank, score, title, snip in rows:
@@ -211,7 +247,8 @@ def search_cmd(
         if not rows:
             err.print(f"no documents match {query!r}")
             raise typer.Exit(0)
-        table = Table(title=f"{len(matched)} documents match {query!r} ({scorer.value})")
+        how = scorer.value if mode is ModeName.keyword else mode.value
+        table = Table(title=f"{len(matched)} documents match {query!r} ({how})")
         table.add_column("#", justify="right")
         table.add_column("score", justify="right")
         table.add_column("title", style="bold")
@@ -223,6 +260,40 @@ def search_cmd(
                 cells.append(_highlighted(snip))
             table.add_row(*cells)
         out.print(table)
+
+
+@app.command("embed")
+def embed_cmd(
+    index_path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, help="index file")],
+    out_dir: Annotated[
+        Path | None, typer.Option("--out", "-o", help="folder (default: <index>.emb)")
+    ] = None,
+    model: Annotated[str, typer.Option(help="model2vec model name")] = "minishlab/potion-base-8M",
+) -> None:
+    """Chunk every document, embed the chunks, save the vectors (semantic search, Lab 8)."""
+    from findex.semantic import count_chunks, embed_index, load_model
+
+    folder = out_dir or index_path.with_suffix(".emb")
+    with open_index(index_path) as index:
+        total = count_chunks(index)
+        encoder = load_model(model)
+        progress = Progress(
+            TextColumn("[bold]embedding"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            console=err,
+        )
+        with progress:
+            task = progress.add_task("chunks", total=total)
+            semantic = embed_index(
+                index, encoder, model, progress=lambda n: progress.advance(task, n)
+            )
+        semantic.save(folder)
+    size = semantic.vectors.nbytes / 2**20
+    out.print(
+        f"{semantic.vectors.shape[0]:,} chunks x {semantic.vectors.shape[1]} dims ({size:.1f} MiB) -> [bold]{folder}[/]"
+    )
 
 
 @app.command("stats")

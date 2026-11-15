@@ -92,7 +92,33 @@ def cache_info() -> str:
 def search(
     index: Index, query: str, scorer: Scorer | None = None, k: int = 10
 ) -> list[SearchResult]:
-    """Match with the query tree, then rank the matched documents and keep the top k."""
+    """Match with the query tree, then rank the matched documents and keep the top k.
+
+    BM25 and TF-IDF are scored with NumPy array expressions (Lab 8, findex.vector);
+    any other Scorer falls back to the per-posting loop of Lab 3.
+    """
+    if not query.strip():
+        return []
+    scorer = scorer or BM25()
+    if not isinstance(scorer, BM25 | TfIdf):
+        return search_loop(index, query, scorer, k)
+    from findex import vector  # numpy is imported only when actually scoring
+
+    matched, terms = match(index, query)
+    present = tuple(t for t in terms if t in index)
+    if isinstance(scorer, BM25):
+        scores = vector.bm25_scores(index, present, scorer.k1, scorer.b)
+    else:
+        scores = vector.tfidf_scores(index, present)
+    candidates = vector.np.fromiter(matched, dtype=vector.np.int32, count=len(matched))
+    top = vector.top_k(scores, candidates, k)
+    return [SearchResult(score, doc_id, index.doc_meta[doc_id].title) for doc_id, score in top]
+
+
+def search_loop(
+    index: Index, query: str, scorer: Scorer | None = None, k: int = 10
+) -> list[SearchResult]:
+    """The Lab 3 scorer: a Python loop over every posting of every query term."""
     if not query.strip():
         return []
     scorer = scorer or BM25()

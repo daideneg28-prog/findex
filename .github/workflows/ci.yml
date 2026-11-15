@@ -19,7 +19,7 @@ jobs:
           enable-cache: true
 
       - name: Install
-        run: uv sync --locked
+        run: uv sync --locked --all-extras
 
       - name: Lint (ruff)
         run: |
@@ -31,6 +31,14 @@ jobs:
 
       - name: Tests (pytest + Hypothesis + coverage)
         run: uv run pytest --cov --cov-report=term-missing
+
+      - name: Benchmarks (pytest-benchmark)
+        run: uv run pytest tests/test_benchmarks.py --benchmark-enable --benchmark-json=benchmark.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark
+          path: benchmark.json
 
       - name: Build wheel and install it as a tool
         run: |
@@ -60,6 +68,7 @@ jobs:
           done
           curl -fs http://localhost:8000/health
           curl -fs "http://localhost:8000/search?q=alice&k=3" | python3 -m json.tool
+          curl -fs "http://localhost:8000/search?q=girl+falls+down+a+rabbit+hole&mode=hybrid&k=3" | python3 -m json.tool
           test "$(curl -s -o /dev/null -w '%{http_code}' 'http://localhost:8000/search?k=abc&q=x')" = 422
           docker exec findex id -u | grep -qx 1000   # runs as the non-root user
           docker stats --no-stream findex

@@ -33,6 +33,12 @@ def normalize(text: str) -> str:
 
 
 def tokenize(text: str) -> Iterator[str]:
-    """Yield normalized tokens from `text` lazily (re.finditer, not findall)."""
-    for match in TOKEN_RE.finditer(normalize(text)):
-        yield match.group().translate(_APOS_TABLE)
+    """Yield the normalized tokens of one document.
+
+    Lab 8: this was `for m in TOKEN_RE.finditer(...): yield m.group().translate(...)` —
+    per token a Match object, a .group() and a .translate(): 47% of index build time in
+    the py-spy profile. Mapping the apostrophes once for the whole text and letting
+    findall build the token list in C gives identical tokens 1.5x faster. The stream
+    of *documents* stays lazy; one document's token list is the price.
+    """
+    yield from TOKEN_RE.findall(normalize(text).translate(_APOS_TABLE))

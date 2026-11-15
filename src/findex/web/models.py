@@ -22,6 +22,7 @@ class SearchHit(BaseModel):
 
 class SearchResponse(BaseModel):
     query: str
+    mode: Literal["keyword", "semantic", "hybrid"] = "keyword"
     scorer: ScorerName
     total: int = Field(description="number of matching documents (all pages)")
     page: int

@@ -15,3 +15,5 @@ dist/
 .coverage
 htmlcov/
 *.log
+minilm.log
+scalene-profile.json

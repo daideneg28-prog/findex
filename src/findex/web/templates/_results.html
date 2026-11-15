@@ -2,7 +2,7 @@
   <p class="error">{{ error }}</p>
 {% elif found %}
   <p class="meta">{{ found.total }} document{{ "" if found.total == 1 else "s" }} match
-    <strong>{{ found.query }}</strong> · {{ found.took_ms }} ms · {{ found.scorer | upper }}</p>
+    <strong>{{ found.query }}</strong> · {{ found.took_ms }} ms · {{ found.mode }}{% if found.mode != "semantic" %} · {{ found.scorer | upper }}{% endif %}</p>
   <ol class="hits" start="{{ (found.page - 1) * found.k + 1 }}">
   {% for hit, snip in hits %}
     <li>
@@ -14,9 +14,9 @@
   </ol>
   {% if found.pages > 1 %}
   <nav class="pages">
-    {% if found.page > 1 %}<a href="/?q={{ found.query | urlencode }}&scorer={{ found.scorer }}&page={{ found.page - 1 }}">← previous</a>{% endif %}
+    {% if found.page > 1 %}<a href="/?q={{ found.query | urlencode }}&scorer={{ found.scorer }}&mode={{ found.mode }}&page={{ found.page - 1 }}">← previous</a>{% endif %}
     <span>page {{ found.page }} of {{ found.pages }}</span>
-    {% if found.page < found.pages %}<a href="/?q={{ found.query | urlencode }}&scorer={{ found.scorer }}&page={{ found.page + 1 }}">next →</a>{% endif %}
+    {% if found.page < found.pages %}<a href="/?q={{ found.query | urlencode }}&scorer={{ found.scorer }}&mode={{ found.mode }}&page={{ found.page + 1 }}">next →</a>{% endif %}
   </nav>
   {% endif %}
 {% elif q %}

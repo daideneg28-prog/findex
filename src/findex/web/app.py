@@ -36,8 +36,10 @@ from findex.corpus import read_document
 from findex.index import Index
 from findex.query import QuerySyntaxError
 from findex.rank import SCORERS, match, search
+from findex.semantic import Mode, SemanticIndex, ranked
 from findex.snippets import snippet
 from findex.store import load
+from findex.tokenize import tokenize
 from findex.web.models import (
     DocumentOut,
     ErrorOut,
@@ -115,7 +117,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     """
     settings: Settings = app.state.settings
     app.state.index = None
+    app.state.semantic = None
     app.state.started = time.monotonic()
+
+    def load_semantic() -> SemanticIndex | None:
+        folder = settings.embeddings_path or settings.index_path.with_suffix(".emb")
+        if not (folder / "meta.json").exists():
+            log.info("no embeddings in %s: semantic and hybrid search are off", folder)
+            return None
+        semantic = SemanticIndex.load(folder)
+        _ = semantic.model  # load the model now, not on the first query
+        return semantic
 
     async def load_index() -> None:
         try:
@@ -125,6 +137,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             return
         app.state.index = index
         log.info("index loaded: %r from %s", index, settings.index_path)
+        try:
+            app.state.semantic = await asyncio.to_thread(load_semantic)
+        except (OSError, ValueError, ImportError) as exc:
+            log.warning("semantic search unavailable: %s", exc)
+        else:
+            if app.state.semantic is not None:
+                log.info("embeddings loaded: %s", app.state.semantic.vectors.shape)
 
     with configured_logging(settings):
         loader = asyncio.create_task(load_index())
@@ -146,6 +165,10 @@ async def index_state(request: Request) -> Index | None:
     return request.app.state.index
 
 
+async def semantic_state(request: Request) -> SemanticIndex | None:
+    return request.app.state.semantic
+
+
 async def get_index(index: Annotated[Index | None, Depends(index_state)]) -> Index:
     if index is None:
         raise HTTPException(503, "index not loaded yet")
@@ -153,6 +176,7 @@ async def get_index(index: Annotated[Index | None, Depends(index_state)]) -> Ind
 
 
 IndexDep = Annotated[Index, Depends(get_index)]
+SemanticDep = Annotated[SemanticIndex | None, Depends(semantic_state)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 Q = Annotated[str, Query(min_length=1, max_length=200, description="query, e.g. whale NOT ship")]
 K = Annotated[int, Query(ge=1, le=100, description="results per page")]
@@ -163,33 +187,55 @@ PageQ = Annotated[int, Query(ge=1, le=1000, description="1-based page number")]
 
 
 @lru_cache(maxsize=32)
+def _document(path: str, name: str) -> tuple[str, str]:
+    """(text, text.lower()) of a document. Books are read again and again for snippets,
+    so the most recent ones stay in memory, already lower-cased for the fast scan."""
+    text = read_document(Path(path), name)
+    return text, text.lower()
+
+
 def _document_text(path: str, name: str) -> str:
-    """Book texts are read again and again for snippets; keep the most recent ones."""
-    return read_document(Path(path), name)
+    return _document(path, name)[0]
 
 
 def run_search(
-    index: Index, q: str, k: int, page: int, scorer: ScorerName, mark: tuple[str, str]
+    index: Index,
+    q: str,
+    k: int,
+    page: int,
+    scorer: ScorerName,
+    mark: tuple[str, str],
+    mode: Mode = "keyword",
+    semantic: SemanticIndex | None = None,
 ) -> SearchResponse:
     t0 = time.perf_counter()
-    try:
-        matched, terms = match(index, q)
-    except QuerySyntaxError as exc:
-        raise HTTPException(422, f"query error: {exc}") from exc
-    total = len(matched)
-    top = search(index, q, SCORERS[scorer], k * page)[k * (page - 1) :]
-    hits: list[SearchHit] = []
-    for r in top:
-        meta = index.doc_meta[r.doc_id]
+    top: list[tuple[int, float]]
+    if mode == "keyword":
         try:
-            snip = snippet(_document_text(meta.path, meta.name), terms, mark=mark)
+            matched, terms = match(index, q)
+        except QuerySyntaxError as exc:
+            raise HTTPException(422, f"query error: {exc}") from exc
+        total = len(matched)
+        results = search(index, q, SCORERS[scorer], k * page)[k * (page - 1) :]
+        top = [(r.doc_id, r.score) for r in results]
+    else:
+        if semantic is None:
+            raise HTTPException(503, f"{mode} search is not available on this server")
+        ranking = ranked(index, q, mode, semantic, k * page, scorer, depth=max(100, k * page))
+        total, terms = len(ranking), tuple(tokenize(q))
+        top = ranking[k * (page - 1) :]
+    hits: list[SearchHit] = []
+    for doc_id, score in top:
+        meta = index.doc_meta[doc_id]
+        try:
+            text, lowered = _document(meta.path, meta.name)
+            snip = snippet(text, terms, mark=mark, lowered=lowered)
         except OSError:
             snip = ""
-        hits.append(
-            SearchHit(doc_id=r.doc_id, title=r.title, score=round(r.score, 4), snippet=snip)
-        )
+        hits.append(SearchHit(doc_id=doc_id, title=meta.title, score=round(score, 4), snippet=snip))
     return SearchResponse(
         query=q,
+        mode=mode,
         scorer=scorer,
         total=total,
         page=page,
@@ -214,6 +260,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = settings
     app.state.index = None
+    app.state.semantic = None
     app.state.started = time.monotonic()
     if settings.cors_origins:
         app.add_middleware(
@@ -260,12 +307,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/search", response_model=SearchResponse, tags=["api"])
     async def search_route(
-        index: IndexDep, q: Q, k: K = 10, page: PageQ = 1, scorer: ScorerName = "bm25"
+        index: IndexDep,
+        semantic: SemanticDep,
+        q: Q,
+        k: K = 10,
+        page: PageQ = 1,
+        scorer: ScorerName = "bm25",
+        mode: Mode = "keyword",
     ) -> SearchResponse:
-        """Ranked, paginated search. The CPU work runs in a bounded thread pool, never on
-        the event loop (see README, Lab 7)."""
+        """Ranked, paginated search: `keyword` (BM25/TF-IDF and the query language),
+        `semantic` (embeddings), or `hybrid` (both, fused with RRF). The CPU work runs in a
+        bounded thread pool, never on the event loop (see README, Labs 7-8)."""
         return await anyio.to_thread.run_sync(
-            run_search, index, q, k, page, scorer, ("«", "»"), limiter=search_limiter
+            run_search,
+            index,
+            q,
+            k,
+            page,
+            scorer,
+            ("«", "»"),
+            mode,
+            semantic,
+            limiter=search_limiter,
         )
 
     @app.get("/search-def", response_model=SearchResponse, include_in_schema=False)
@@ -338,13 +401,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         safe = str(escape(snip))
         return Markup(safe.replace(_UI_MARK[0], "<mark>").replace(_UI_MARK[1], "</mark>"))
 
-    def ui_results(index: Index | None, q: str, page: int, scorer: ScorerName) -> dict[str, Any]:
-        context: dict[str, Any] = {"q": q, "page": page, "scorer": scorer, "error": None}
+    def ui_results(
+        index: Index | None,
+        semantic: SemanticIndex | None,
+        q: str,
+        page: int,
+        scorer: ScorerName,
+        mode: Mode,
+    ) -> dict[str, Any]:
+        context: dict[str, Any] = {
+            "q": q,
+            "page": page,
+            "scorer": scorer,
+            "mode": mode,
+            "semantic": semantic is not None,
+            "error": None,
+        }
         if index is None:
             context["error"] = "The index is still loading — try again in a few seconds."
         elif q.strip():
             try:
-                found = run_search(index, q, settings.page_size, page, scorer, _UI_MARK)
+                found = run_search(
+                    index, q, settings.page_size, page, scorer, _UI_MARK, mode, semantic
+                )
             except HTTPException as exc:
                 context["error"] = str(exc.detail)
             else:
@@ -356,11 +435,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def home(
         request: Request,
         index: Annotated[Index | None, Depends(index_state)],
+        semantic: SemanticDep,
         q: Annotated[str, Query(max_length=200)] = "",
         page: PageQ = 1,
         scorer: ScorerName = "bm25",
+        mode: Mode = "keyword",
     ) -> HTMLResponse:
-        context = ui_results(index, q, page, scorer)
+        context = ui_results(index, semantic, q, page, scorer, mode)
         if index is not None:
             context["documents"] = index.num_docs
         return templates.TemplateResponse(request, "index.html", context)
@@ -369,14 +450,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def results_fragment(
         request: Request,
         index: Annotated[Index | None, Depends(index_state)],
+        semantic: SemanticDep,
         q: Annotated[str, Query(max_length=200)] = "",
         page: PageQ = 1,
         scorer: ScorerName = "bm25",
+        mode: Mode = "keyword",
     ) -> HTMLResponse:
         """Just the results list: htmx swaps it in while the user types."""
-        return templates.TemplateResponse(
-            request, "_results.html", ui_results(index, q, page, scorer)
-        )
+        context = ui_results(index, semantic, q, page, scorer, mode)
+        return templates.TemplateResponse(request, "_results.html", context)
 
     @app.get("/doc/{doc_id}", response_class=HTMLResponse, include_in_schema=False)
     def document_page(request: Request, index: IndexDep, doc_id: int) -> HTMLResponse:

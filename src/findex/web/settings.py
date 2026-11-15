@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     index_path: Path = Path("data/index.pkl")
+    embeddings_path: Path | None = None  # default: <index_path>.emb, if it exists
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_json: bool = True  # one JSON object per log line (what log platforms parse)
     page_size: int = Field(default=10, ge=1, le=100)

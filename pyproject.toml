@@ -17,6 +17,7 @@ dependencies = [
     "fastapi>=0.120",
     "httpx>=0.28",
     "jinja2>=3.1",
+    "numpy>=2.5.4",
     "pydantic-settings>=2.11",
     "rich>=15.0.0",
     "typer>=0.29.1",
@@ -29,6 +30,11 @@ Repository = "https://github.com/daideneg28-prog/findex"
 [project.scripts]
 findex = "findex.cli:app"
 
+[project.optional-dependencies]
+semantic = [
+    "model2vec>=0.10.0",
+]
+
 [build-system]
 requires = ["uv_build>=0.13.8,<0.14.0"]
 build-backend = "uv_build"
@@ -37,10 +43,13 @@ build-backend = "uv_build"
 dev = [
     "httpx2>=2.16.0",
     "hypothesis>=6.170.15",
+    "py-spy>=0.4.3",
     "pyright>=1.1.414",
     "pytest>=9.2.0",
+    "pytest-benchmark>=5.3.1",
     "pytest-cov>=7.1.0",
     "ruff>=0.17.5",
+    "scalene>=2.4.0",
 ]
 
 [tool.ruff]
@@ -50,7 +59,7 @@ line-length = 100
 testpaths = ["tests"]
 # -p no:hypothesispytest: the optional reporting plugin imports Hypothesis' native extension
 # at startup, which Windows Smart App Control blocks on the author's laptop; @given works without it.
-addopts = "-ra --strict-markers -p no:hypothesispytest"
+addopts = "-ra --strict-markers -p no:hypothesispytest --benchmark-disable"
 markers = ["slow: takes more than a second (deselect with -m 'not slow')"]
 
 [tool.coverage.run]
