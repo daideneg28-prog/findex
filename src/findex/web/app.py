@@ -15,8 +15,8 @@ import logging
 import math
 import time
 import uuid
-from collections.abc import AsyncGenerator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from functools import lru_cache
 from pathlib import Path
@@ -82,16 +82,23 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(entry, ensure_ascii=False)
 
 
-def configure_logging(settings: Settings) -> None:
+@contextmanager
+def configured_logging(settings: Settings) -> Generator[None]:
+    """JSON lines from every `findex.*` logger while the app runs; the old setup after."""
     handler = logging.StreamHandler()  # stderr; platforms collect stdout and stderr alike
     handler.addFilter(_RequestIdFilter())
     handler.setFormatter(
         JsonFormatter() if settings.log_json else logging.Formatter("%(levelname)s %(message)s")
     )
-    root = logging.getLogger("findex")
-    root.handlers[:] = [handler]
-    root.setLevel(settings.log_level)
-    root.propagate = False
+    logger = logging.getLogger("findex")
+    saved = (logger.handlers[:], logger.level, logger.propagate)
+    logger.handlers[:] = [handler]
+    logger.setLevel(settings.log_level)
+    logger.propagate = False
+    try:
+        yield
+    finally:
+        logger.handlers[:], logger.level, logger.propagate = saved
 
 
 # --- index lifecycle and dependencies ---------------------------------------------------------
@@ -117,14 +124,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         app.state.index = index
         log.info("index loaded: %r from %s", index, settings.index_path)
 
-    loader = asyncio.create_task(load_index())
-    try:
-        yield
-    finally:  # graceful shutdown (uvicorn handles SIGTERM, then runs this)
-        loader.cancel()
-        if app.state.index is not None:
-            app.state.index.close()
-        log.info("shut down")
+    with configured_logging(settings):
+        loader = asyncio.create_task(load_index())
+        try:
+            yield
+        finally:  # graceful shutdown (uvicorn handles SIGTERM, then runs this)
+            loader.cancel()
+            if app.state.index is not None:
+                app.state.index.close()
+            log.info("shut down")
 
 
 async def index_state(request: Request) -> Index | None:
@@ -195,7 +203,6 @@ def run_search(
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
-    configure_logging(settings)
     app = FastAPI(
         title="findex",
         version=__version__,
