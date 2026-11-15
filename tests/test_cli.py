@@ -55,6 +55,30 @@ def test_index_executors_write_identical_files(
     assert out.read_bytes() == reference.read_bytes()
 
 
+def test_crawl_command_streams_jsonl(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from collections.abc import AsyncGenerator
+
+    import findex.cli
+    from findex.crawler import CrawlStats, Page
+
+    async def fake_crawl(
+        seeds: list[str], *, stats: CrawlStats, max_pages: int, **_: object
+    ) -> AsyncGenerator[Page]:
+        for i in range(max_pages):
+            stats.pages += 1
+            yield Page(f"{seeds[0]}p{i}", f"Page {i}", f"text {i}", "2026-01-01T00:00:00+00:00")
+
+    monkeypatch.setattr(findex.cli, "crawl", fake_crawl)
+    out = tmp_path / "c" / "crawl.jsonl"
+    result = runner.invoke(app, ["crawl", "https://x.test/", "--max-pages", "3", "-o", str(out)])
+    assert result.exit_code == 0, result.output
+    lines = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    assert [r["title"] for r in lines] == ["Page 0", "Page 1", "Page 2"]
+    assert lines[0]["id"] == "https://x.test/p0"
+    assert (tmp_path / "c" / "crawl.log").exists()
+    assert "3 pages" in result.stdout
+
+
 def test_index_rejects_array_with_positions(corpus_dir: Path, tmp_path: Path) -> None:
     result = runner.invoke(
         app, ["index", str(corpus_dir), "--out", str(tmp_path / "x.pkl"), "--repr", "array"]

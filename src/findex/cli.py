@@ -4,6 +4,8 @@
                            [--executor serial|threads|processes] [--workers N]
     findex [-v|-vv] search <index> "<query>" [-k 10] [--scorer bm25|tfidf] [--json]
     findex [-v|-vv] stats  <index> [--top 20]
+    findex [-v|-vv] crawl  <seed-url>... [--max-pages 500] [--concurrency 10] [--per-host 2]
+                           [--delay 0.5] [--domain d]... [--out data/crawl/crawl.jsonl]
 
 Results go to stdout; every diagnostic (logs, progress, errors) goes to stderr, so
 `findex search ix.pkl "q" --json | jq .title` stays clean.
@@ -11,10 +13,12 @@ Results go to stdout; every diagnostic (logs, progress, errors) goes to stderr, 
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 from collections import Counter
+from contextlib import aclosing
 from enum import StrEnum
 from itertools import islice
 from pathlib import Path
@@ -22,13 +26,15 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.live import Live
 from rich.logging import RichHandler
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeElapsedColumn
 from rich.table import Table
 from rich.text import Text
 
 from findex import __version__
-from findex.corpus import iter_paths
+from findex.corpus import iter_paths, read_document
+from findex.crawler import CrawlStats, crawl
 from findex.index import REPRESENTATIONS, Representation, open_index
 from findex.parallel import EXECUTORS, Executor, build_from_paths
 from findex.query import QuerySyntaxError
@@ -186,9 +192,10 @@ def search_cmd(
         for rank, r in enumerate(results, start=1):
             snip = ""
             if snippets:
-                path = Path(index.doc_meta[r.doc_id].path)
+                meta = index.doc_meta[r.doc_id]
+                path = Path(meta.path)
                 try:
-                    snip = snippet(path.read_text(encoding="utf-8"), terms, mark=_MARK)
+                    snip = snippet(read_document(path, meta.name), terms, mark=_MARK)
                 except OSError:
                     log.warning("cannot read %s for a snippet", path)
             rows.append((rank, r.score, r.title, snip))
@@ -242,6 +249,102 @@ def stats_cmd(
         for rank, (term, count) in enumerate(totals.most_common(top), start=1):
             terms.add_row(str(rank), term, f"{count:,}", str(index.df(term)))
         out.print(terms)
+
+
+def _crawl_stats_table(stats: CrawlStats, max_pages: int) -> Table:
+    table = Table(show_header=False, title="crawling", min_width=40)
+    table.add_row("pages", f"{stats.pages} / {max_pages}")
+    table.add_row("pages/s", f"{stats.pages_per_s:.1f}")
+    table.add_row("in flight", str(stats.in_flight))
+    table.add_row("queue", str(stats.queued))
+    table.add_row("errors", str(stats.errors))
+    table.add_row("retries", str(stats.retries))
+    table.add_row("robots.txt blocked", str(stats.robots_blocked))
+    table.add_row("downloaded", f"{stats.bytes / 2**20:.1f} MiB")
+    return table
+
+
+async def _crawl(
+    seeds: list[str],
+    out_path: Path,
+    log_path: Path,
+    stats: CrawlStats,
+    *,
+    max_pages: int,
+    concurrency: int,
+    per_host: int,
+    min_delay: float,
+    domains: list[str] | None,
+) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with (
+        out_path.open("w", encoding="utf-8") as out_file,
+        log_path.open("w", encoding="utf-8") as log_file,
+        Live(_crawl_stats_table(stats, max_pages), console=err, refresh_per_second=4) as live,
+    ):
+
+        async def refresh() -> None:
+            while True:
+                live.update(_crawl_stats_table(stats, max_pages))
+                await asyncio.sleep(0.25)
+
+        ticker = asyncio.create_task(refresh())
+        try:
+            pages = crawl(
+                seeds,
+                max_pages=max_pages,
+                concurrency=concurrency,
+                per_host=per_host,
+                min_delay=min_delay,
+                allowed_domains=domains,
+                stats=stats,
+                log_file=log_file,
+            )
+            async with aclosing(pages):
+                async for page in pages:  # streamed: one line per page, as it arrives
+                    out_file.write(json.dumps(page.to_json(), ensure_ascii=False) + "\n")
+        finally:
+            ticker.cancel()
+            live.update(_crawl_stats_table(stats, max_pages))
+
+
+@app.command("crawl")
+def crawl_cmd(
+    seeds: Annotated[list[str], typer.Argument(help="start URL(s)")],
+    out_path: Annotated[Path, typer.Option("--out", "-o", help="JSON lines output")] = Path(
+        "data/crawl/crawl.jsonl"
+    ),
+    max_pages: Annotated[int, typer.Option(min=1, help="page budget")] = 500,
+    concurrency: Annotated[int, typer.Option(min=1, help="worker tasks")] = 10,
+    per_host: Annotated[int, typer.Option(min=1, help="max requests in flight per host")] = 2,
+    delay: Annotated[
+        float, typer.Option(min=0, help="min seconds between requests to a host")
+    ] = 0.5,
+    domain: Annotated[
+        list[str] | None, typer.Option(help="allowed domain (repeatable; default: the seeds')")
+    ] = None,
+    log_path: Annotated[Path | None, typer.Option("--log", help="per-URL log")] = None,
+) -> None:
+    """Crawl politely from seed URLs; write pages as JSON lines for `findex index`."""
+    stats = CrawlStats()
+    log_path = log_path or out_path.with_name("crawl.log")
+    asyncio.run(
+        _crawl(
+            seeds,
+            out_path,
+            log_path,
+            stats,
+            max_pages=max_pages,
+            concurrency=concurrency,
+            per_host=per_host,
+            min_delay=delay,
+            domains=domain,
+        )
+    )
+    out.print(
+        f"{stats.pages} pages in {stats.elapsed:.1f} s ({stats.pages_per_s:.1f} pages/s), "
+        f"{stats.errors} errors -> [bold]{out_path}[/], log: {log_path}"
+    )
 
 
 if __name__ == "__main__":

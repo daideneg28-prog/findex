@@ -15,6 +15,7 @@ class Document(NamedTuple):
     doc_id: str
     path: Path
     text: str
+    title: str = ""  # known for crawled pages (JSONL "title"); books get theirs from titles.json
 
 
 def _read_text(path: Path) -> str:
@@ -38,7 +39,7 @@ def _iter_jsonl(path: Path) -> Iterator[Document]:
                 log.warning("%s:%d: invalid JSON (%s); skipped", path, lineno, exc)
                 continue
             doc_id = str(obj.get("id", f"{path.stem}:{lineno}"))
-            yield Document(doc_id, path, str(obj.get("text", "")))
+            yield Document(doc_id, path, str(obj.get("text", "")), str(obj.get("title", "")))
 
 
 SUFFIXES = (".txt", ".jsonl")
@@ -74,3 +75,12 @@ def iter_documents(root: Path) -> Iterator[Document]:
     """
     for path in iter_paths(root):
         yield from iter_file(path)
+
+
+def read_document(path: Path, doc_id: str) -> str:
+    """The text of one document, e.g. for a snippet: the whole .txt file, or the one
+    line of a .jsonl file whose id is `doc_id` (streamed, the file is not loaded)."""
+    path = Path(path)
+    if path.suffix != ".jsonl":
+        return _read_text(path)
+    return next((doc.text for doc in _iter_jsonl(path) if doc.doc_id == doc_id), "")

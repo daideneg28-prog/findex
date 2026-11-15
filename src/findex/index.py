@@ -186,6 +186,8 @@ class Titles:
         self._cache: dict[Path, dict[str, str]] = {}
 
     def get(self, doc: Document) -> str:
+        if doc.title:
+            return doc.title
         folder = doc.path.parent
         if folder not in self._cache:
             file = folder / "titles.json"

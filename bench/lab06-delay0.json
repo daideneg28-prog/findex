@@ -1,0 +1,35 @@
+[
+ {
+  "concurrency": 1,
+  "pages": 200,
+  "wall": 35.66481450002175,
+  "pages_per_s": 5.607767846370771,
+  "errors": 0,
+  "retries": 0,
+  "robots_blocked": 14,
+  "mib": 11.410111427307129,
+  "rss": 58.1015625
+ },
+ {
+  "concurrency": 5,
+  "pages": 200,
+  "wall": 5.331400700029917,
+  "pages_per_s": 37.51359375386617,
+  "errors": 0,
+  "retries": 0,
+  "robots_blocked": 63,
+  "mib": 11.61509895324707,
+  "rss": 58.52734375
+ },
+ {
+  "concurrency": 20,
+  "pages": 200,
+  "wall": 3.910652599995956,
+  "pages_per_s": 51.142359206288695,
+  "errors": 0,
+  "retries": 0,
+  "robots_blocked": 64,
+  "mib": 11.072369575500488,
+  "rss": 55.1484375
+ }
+]
