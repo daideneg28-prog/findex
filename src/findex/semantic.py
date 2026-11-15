@@ -43,7 +43,24 @@ class Encoder(Protocol):
     def encode(self, sentences: list[str]) -> npt.NDArray[Any]: ...
 
 
+class _SentenceTransformer:
+    """Adapter for transformer models (needs PyTorch, which is not a dependency)."""
+
+    def __init__(self, name: str) -> None:
+        import importlib
+
+        module: Any = importlib.import_module("sentence_transformers")
+        self._model: Any = module.SentenceTransformer(name, device="cpu")
+
+    def encode(self, sentences: list[str]) -> npt.NDArray[Any]:
+        return self._model.encode(sentences, batch_size=64, convert_to_numpy=True)
+
+
 def load_model(name: str = DEFAULT_MODEL) -> Encoder:
+    """model2vec static models by default; `sentence-transformers/...` names load a
+    transformer (only for the Lab 8 comparison: `uv run --with sentence-transformers`)."""
+    if name.startswith("sentence-transformers/"):
+        return _SentenceTransformer(name)
     from model2vec import StaticModel  # optional dependency: `uv sync --extra semantic`
 
     return StaticModel.from_pretrained(name)
