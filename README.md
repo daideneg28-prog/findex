@@ -3,12 +3,70 @@
 [![CI](https://github.com/daideneg28-prog/findex/actions/workflows/ci.yml/badge.svg)](https://github.com/daideneg28-prog/findex/actions/workflows/ci.yml)
 [![release](https://img.shields.io/github/v/release/daideneg28-prog/findex)](https://github.com/daideneg28-prog/findex/releases)
 
-**Живе демо: https://findex-e2xj.onrender.com** (UI) · [API-документація `/docs`](https://findex-e2xj.onrender.com/docs) ·
-[`/health`](https://findex-e2xj.onrender.com/health). Безкоштовний інстанс Render засинає без трафіку: перший запит після паузи йде ~50 с.
+**Пошукова система, написана з нуля на Python за 8 лабораторних:** інвертований індекс з позиціями, мова запитів
+з фразами, BM25 на NumPy, семантичний і гібридний пошук, паралельна індексація, асинхронний краулер, вебсервіс на FastAPI.
 
-Невелика пошукова система, яку я будую протягом семестру в курсі
-«Python програмування» ([опис курсу](https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/README.md)).
-Кожна лабораторна додає одну можливість мови й один крок проєкту; кожна позначена git-тегом `lab-0N`.
+### ▶ Живе демо: **https://findex-e2xj.onrender.com** · [API `/docs`](https://findex-e2xj.onrender.com/docs) · [`/health`](https://findex-e2xj.onrender.com/health)
+
+<sub>Безкоштовний інстанс Render засинає без трафіку: перший запит після паузи йде ~50 с. На ньому 40 книг (512 МБ RAM);
+локально й у таблицях нижче — 150 книг.</sub>
+
+![пошук у findex](docs/demo.gif)
+
+| | |
+|---|---|
+| **Корпус** | 150 книг Project Gutenberg, 86 МБ тексту, **15 млн токенів**, 200 тис. термів; + 500 сторінок документації Python, зкраулених власним краулером |
+| **Швидкість пошуку** | запит з 10 сніпетами: **340 мс → 36 мс** після профілювання (Лаб 8); BM25 на NumPy — **до 29×** швидше за Python-цикл, з *бітово ідентичним* ранжуванням |
+| **Паралельність** | індексація: процеси **2.6×**, потоки на free-threaded Python 3.14t **3.2×**, потоки під GIL **0.97×** (Лаб 5) |
+| **Якість** | precision@5: BM25 0.70 на 10 розмічених запитах; таблиця keyword / semantic / hybrid на 15 запитах (Лаб 8) |
+| **Інженерія** | 185 тестів (Hypothesis, `TestClient`, `MockTransport`, pytest-benchmark), pyright **strict** без `type: ignore`, CI з Docker-перевіркою |
+
+Кожна лабораторна курсу «Python програмування»
+([опис курсу](https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/README.md)) додає одну можливість
+мови й один крок проєкту; кожна позначена git-тегом `lab-0N`, фінальна версія — `v1.0.0`.
+
+### Архітектура
+
+```mermaid
+flowchart LR
+    G[Project Gutenberg<br/>download_corpus.py] --> C[corpus.py<br/>лінивий потік документів<br/><b>Лаб 1</b>]
+    W[Сайти документації] --> K[crawler/<br/>asyncio, robots.txt, TaskGroup<br/><b>Лаб 6</b>] -->|JSONL| C
+    C --> T[tokenize.py<br/>NFC + casefold<br/><b>Лаб 1</b>]
+    T --> P[parallel.py<br/>map-reduce: потоки/процеси<br/><b>Лаб 5</b>]
+    P --> I[index.py<br/>інвертований індекс, позиції<br/><b>Лаб 2</b>]
+    I --> S[store.py<br/>pickle / JSON<br/><b>Лаб 2</b>]
+    I --> Q[query.py<br/>AND/OR/NOT, фрази<br/><b>Лаб 3</b>]
+    Q --> R[rank.py + vector.py<br/>BM25/TF-IDF на NumPy<br/><b>Лаб 3, 8</b>]
+    I --> E[semantic.py<br/>ембединги, RRF<br/><b>Лаб 8</b>]
+    R --> API[web/<br/>FastAPI + htmx<br/><b>Лаб 7</b>]
+    E --> API
+    R --> CLI[cli.py<br/>typer + rich<br/><b>Лаб 4</b>]
+    API --> D[Docker → Render<br/><b>Лаб 7</b>]
+```
+
+### Усі виміри в одному місці
+
+| Лаба | Що міряли | Результат | Деталі |
+|---|---|---|---|
+| 1 | пам'ять: eager vs lazy підрахунок статистики корпусу | **1015.6 MiB → 85.8 MiB** | [↓](#лаб-1-ітератори-генератори-та-корпус) |
+| 2 | пам'ять індексу: `dict` / `slots` / `array('I')`; pickle vs JSON | 139.8 / 98.4 / **72.2 MiB**; JSON удвічі менший і швидший | [↓](#лаб-2-інвертований-індекс-словники-хешування-та-память) |
+| 3 | precision@5 на 10 розмічених запитах | TF-IDF 0.60 → **BM25 0.70** | [↓](#лаб-3-модель-обєктів-ранжування-мова-запитів) |
+| 4 | тести, покриття, типи | 99 тестів, 90%, pyright strict 0 помилок | [↓](#лаб-4-типи-тести-пакування-і-cli) |
+| 5 | паралельна індексація (wall, CPU, RSS, merge) | серійно 21.1 s; процеси **8.1 s**; потоки 21.8 s; 3.14t потоки **6.7 s**; гонка: −5.8% оновлень без GIL | [↓](#лаб-5-конкурентність-і-gil--потоки-процеси-free-threaded-python) |
+| 6 | краулер, 200 сторінок | конкурентність 1 → 20: **35.7 s → 3.9 s** (9×) | [↓](#лаб-6-асинхронний-краулер-на-asyncio) |
+| 7 | `oha`, 50 клієнтів: `def` / `async def` / ліміт потоків / 4 воркери | 5.5 / 6.3 / 7.6 / **18.0 RPS**; `/health` під навантаженням 2.8 s → **175 ms** | [↓](#лаб-7-пошук-у-вебі--fastapi-pydantic-docker-render) |
+| 8 | профіль запиту; NumPy-скорер; сніпети; завантаження | 340 → **36 ms**/запит; скорер до **29×**; сніпети 8–15×; load 4.1 → 2.4 s | [↓](#лаб-8-швидше-потім-розумніше--профілювання-numpy-семантичний-пошук) |
+
+### Обмеження (чесно)
+
+- **Індекс живе в RAM.** 150 книг з позиціями — ~1 ГБ. Тому на безкоштовному Render лише 40 книг. Наступний крок — `np.memmap`
+  постингів з диска й стиснення (gap-encoding).
+- **Оновлення індексу — тільки повна перебудова.** Інкрементального додавання документів немає.
+- **Семантика — легка статична модель** (`potion-base-8M`, 256 вимірів), бо трансформер разом з PyTorch не влазить
+  у 512 МБ. Вона помітно слабша за `all-MiniLM-L6-v2` (див. таблицю Лаб 8).
+- **Пошук ембедингів — перебором** (`E @ q`). Для ~50 тис. фрагментів це мілісекунди; на мільйонах знадобиться HNSW (FAISS).
+- **Корпус англійський.** Токенізатор розуміє кирилицю й апострофи, але стемінгу чи лематизації немає, тож `whales` ≠ `whale`.
+- **Один процес на Render (0.1 CPU):** під навантаженням 20 клієнтів p95 — 22 с. Сервіс не падає, але й не швидкий.
 
 ## Корпус
 
@@ -27,8 +85,11 @@ uv run python scripts/download_corpus.py --count 150
 Як інструмент командного рядка, з wheel у [GitHub Release](https://github.com/daideneg28-prog/findex/releases):
 
 ```bash
-uv tool install https://github.com/daideneg28-prog/findex/releases/download/v0.4.0/findex-0.4.0-py3-none-any.whl
-findex --help
+uv tool install "findex[semantic] @ https://github.com/daideneg28-prog/findex/releases/download/v1.0.0/findex-1.0.0-py3-none-any.whl"
+findex index data/gutenberg -o data/index.pkl      # паралельно, процесами
+findex embed data/index.pkl                         # ембединги для semantic/hybrid
+findex search data/index.pkl 'tarzan "the apes"'    # або --mode semantic|hybrid
+findex serve --index data/index.pkl                 # http://127.0.0.1:8000
 ```
 
 Для розробки:
