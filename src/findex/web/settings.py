@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_json: bool = True  # one JSON object per log line (what log platforms parse)
     page_size: int = Field(default=10, ge=1, le=100)
+    search_threads: int = Field(default=2, ge=1, le=64)  # concurrent searches per process
     cors_origins: list[str] = []  # e.g. CORS_ORIGINS='["https://example.org"]'
 
 

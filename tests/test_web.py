@@ -145,7 +145,8 @@ def test_ui_pages(client: TestClient) -> None:
 def test_async_route_gives_same_answer(client: TestClient) -> None:
     a = client.get("/search", params={"q": "ship"}).json()
     b = client.get("/search-async", params={"q": "ship"}).json()
-    assert a["results"] == b["results"]
+    c = client.get("/search-def", params={"q": "ship"}).json()
+    assert a["results"] == b["results"] == c["results"]
 
 
 def test_json_log_format() -> None:

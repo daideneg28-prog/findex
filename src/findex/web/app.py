@@ -22,6 +22,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any
 
+import anyio
+import anyio.to_thread
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
@@ -250,12 +252,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # --- JSON API -------------------------------------------------------------------------
 
+    # Searches run in worker threads, but at most `search_threads` at a time. FastAPI's
+    # default pool for `def` routes has 40 threads; 40 CPU-bound threads fighting for one
+    # GIL starve the event loop, so /health stopped answering and Render killed the
+    # instance (README, Lab 7). Waiting requests now queue cheaply on the loop instead.
+    search_limiter = anyio.CapacityLimiter(settings.search_threads)
+
     @app.get("/search", response_model=SearchResponse, tags=["api"])
-    def search_route(
+    async def search_route(
         index: IndexDep, q: Q, k: K = 10, page: PageQ = 1, scorer: ScorerName = "bm25"
     ) -> SearchResponse:
-        """Ranked, paginated search. `def`, not `async def`: scoring is CPU work, so FastAPI
-        runs it in its thread pool instead of on the event loop (see README, Lab 7)."""
+        """Ranked, paginated search. The CPU work runs in a bounded thread pool, never on
+        the event loop (see README, Lab 7)."""
+        return await anyio.to_thread.run_sync(
+            run_search, index, q, k, page, scorer, ("«", "»"), limiter=search_limiter
+        )
+
+    @app.get("/search-def", response_model=SearchResponse, include_in_schema=False)
+    def search_def_route(
+        index: IndexDep, q: Q, k: K = 10, page: PageQ = 1, scorer: ScorerName = "bm25"
+    ) -> SearchResponse:
+        """Plain `def` (FastAPI's 40-thread pool), kept for the benchmark."""
         return run_search(index, q, k, page, scorer, ("«", "»"))
 
     @app.get("/search-async", response_model=SearchResponse, include_in_schema=False)
