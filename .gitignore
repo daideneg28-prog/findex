@@ -1,0 +1,14 @@
+# corpus and generated indexes are never committed
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.prof
